@@ -184,6 +184,10 @@ pub fn enum_utils(attr: proc_macro::TokenStream, ast: DeriveInput) -> TokenStrea
                 _ => None,
             }
         }
+
+        pub fn for_all() -> impl std::iter::Iterator<Item = Self> {
+            (0..Self::COUNT).filter_map(|idx| Self::from_idx(idx))
+        }
     });
 
     let as_str = as_str.then(|| quote!{
@@ -217,11 +221,15 @@ pub fn enum_utils(attr: proc_macro::TokenStream, ast: DeriveInput) -> TokenStrea
         }
     });
 
+    let count = enum_data.variants.len();
+
     let tmp = quote! {
         #[derive(bootstrap_macros::EnumHelper)]
         #ast
 
         impl #ident {
+            pub const COUNT: usize = #count;
+
             #from_idx
             #as_str
         }
