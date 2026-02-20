@@ -25,7 +25,7 @@ pub fn enum_utils(attr: proc_macro::TokenStream, ast: DeriveInput) -> TokenStrea
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("as_str") {
             as_str = true;
-            return meta.parse_nested_meta(|meta| {
+            _ = meta.parse_nested_meta(|meta| {
                 let ident = meta.path.require_ident()?;
                 str_casing = match get_casing(ident) {
                     Ok(casing) => casing,
@@ -33,6 +33,7 @@ pub fn enum_utils(attr: proc_macro::TokenStream, ast: DeriveInput) -> TokenStrea
                 };
                 Ok(())
             });
+            return Ok(());
         } else if meta.path.is_ident("display") {
             display = true;
             return  Ok(());
@@ -54,6 +55,7 @@ pub fn enum_utils(attr: proc_macro::TokenStream, ast: DeriveInput) -> TokenStrea
     let mut variant_fmt_args = Vec::new();
     let mut variant_fmt_discards = Vec::new();
     let mut variant_vals = Vec::new();
+    let mut has_any_fmt = false;
 
     // Different names in case future features need to use collect this
     let collect_simple_patterns = from_idx || as_str || display;
@@ -103,7 +105,7 @@ pub fn enum_utils(attr: proc_macro::TokenStream, ast: DeriveInput) -> TokenStrea
             match &variant.discriminant {
                 Some((_, expr)) => {
                     let idx = match eval_usize_simple(expr) {
-                        Ok(idx) => idx,
+                        Ok(idx) => idx as usize,
                         Err(err) => return err,
                     };
                     variant_vals.push(idx); 
@@ -162,16 +164,33 @@ pub fn enum_utils(attr: proc_macro::TokenStream, ast: DeriveInput) -> TokenStrea
 
             let fmt_args = match fmt_args {
                 Some(fmt) => fmt,
-                None => {
-                     let name = to_case(ident.to_string(), str_casing);
-                     quote!{ #name }
+                None => if as_str {
+                    quote! {  }
+                } else {
+                    let name = to_case(ident.to_string(), str_casing);
+                    quote!{ #name }
                 },
             };
 
             variant_fmt_args.push(fmt_args);
         }
+    }
 
-
+    let mut variant_fmt_patterns = Vec::<TokenStream>::with_capacity(variant_fmt_args.len());
+    {
+        let mut var_idx = 0;
+        let mut i = 0;
+        while i < variant_fmt_args.len() {
+            let fmt_args = &variant_fmt_args[i];
+            if fmt_args.is_empty() {
+                variant_fmt_args.remove(i);
+            } else {
+                has_any_fmt = true;
+                variant_fmt_patterns.push(variant_full_patterns[var_idx].clone());
+                i += 1;
+            }
+            var_idx += 1;
+        }
     }
     
 
@@ -191,14 +210,14 @@ pub fn enum_utils(attr: proc_macro::TokenStream, ast: DeriveInput) -> TokenStrea
     });
 
     let as_str = as_str.then(|| quote!{
-        pub fn as_str(self) -> &'static str {
+        pub fn as_str(&self) -> &'static str {
             match self {
                 #(#variant_simple_patterns => #variant_names),*
             }
         }
     });
 
-    let to_string = display.then(|| if as_str.is_some() {
+    let to_string = display.then(|| if as_str.is_some() && !has_any_fmt {
         quote! {
             impl std::fmt::Display for #ident {
                 fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -206,7 +225,7 @@ pub fn enum_utils(attr: proc_macro::TokenStream, ast: DeriveInput) -> TokenStrea
                 }
             }
         }
-    } else {
+    } else if variant_fmt_patterns.len() == variant_full_patterns.len() {
         quote! {
             impl std::fmt::Display for #ident {
                 fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -215,6 +234,20 @@ pub fn enum_utils(attr: proc_macro::TokenStream, ast: DeriveInput) -> TokenStrea
                             #variant_fmt_discards
                             write!(f, #variant_fmt_args)
                         }),*
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl std::fmt::Display for #ident {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    match self {
+                        #(#variant_fmt_patterns => {
+                            #variant_fmt_discards
+                            write!(f, #variant_fmt_args)
+                        },)*
+                        _ => f.write_str(self.as_str()),
                     }
                 }
             }
