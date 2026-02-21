@@ -13,6 +13,9 @@ pub use trivia::*;
 mod span;
 pub use span::*;
 
+mod literals;
+pub use literals::*;
+
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 #[enum_utils(as_str(snake_case), display)]
@@ -33,6 +36,8 @@ pub enum Token {
     Punct(Punctuation),
     #[fmt("{_0}")]
     Name(String),
+    #[fmt("{_0}")]
+    Literal(Literal),
 }
 
 pub struct TokenMeta {
@@ -143,8 +148,13 @@ impl fmt::Display for CsvTokenStreamFormatter<'_> {
         f.write_str("token,kind,line,column,byte_offset,byte_len,char_offset,char_len\n")?;
 
         for (tok, meta) in self.tokens.tokens_with_meta() {
+            let kind = match tok {
+                Token::Literal(lit) => lit.as_str(),
+                _ => tok.as_str(),
+            };
+
             write!(f, "{tok},{},{},{},{},{},{},{}\n",
-                tok.as_str(),
+                kind,
                 meta.span.line,
                 meta.span.column,
                 meta.span.byte_offset,

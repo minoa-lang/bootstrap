@@ -4,16 +4,18 @@ use std::{
     collections::HashMap, fmt, fs::File, io::{self, BufRead, BufReader}, mem, ops::RangeBounds
 };
 
-use crate::tokens::{is_whitespace_trivia, Punctuation, ReservedKeyword, Span, StrongKeyword, Token, TokenMeta, TokenStream, Trivia, TriviaElem, WeakKeyword};
+use crate::tokens::{is_whitespace_trivia, Exponent, HexExponent, Literal, LiteralError, LiteralSegment, Punctuation, ReservedKeyword, Span, StrongKeyword, Token, TokenMeta, TokenStream, Trivia, TriviaElem, WeakKeyword};
 
 pub enum LexError {
     IO(io::Error),
+    Literal(LiteralError),
 }
 
 impl fmt::Display for LexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LexError::IO(err) => write!(f, "Lexer file io: {err}"),
+            LexError::Literal(err) => write!(f, "Lex error while lexing literal: {err}"),
         }
     }
 }
@@ -90,6 +92,7 @@ impl Lexer {
                 match ch {
                     _ if is_whitespace_trivia(ch) => self.parse_whitespace(&line, idx),
                     _ if ch.is_alphabetic() => self.parse_kw_or_name(),
+                    _ if ch.is_numeric() => self.parse_numeric_literal(),
                     _ => self.parse_punctuation(),
                 }
             }
@@ -141,6 +144,27 @@ impl Lexer {
         let line = &self.line_buf[self.line_offset..];
         let len = line.find(|ch| !pat(ch)).unwrap_or(line.len());
         &line[..len]
+    }
+
+    fn read_offset<'a, P: FnMut(char) -> bool>(&'a self, offset: usize, mut pat: P) -> &'a str {
+        let offset = offset.min(self.line_buf.len() - self.line_offset);
+        let offset_line = &self.line_buf[self.line_offset + offset..];
+        let len = offset_line.find(|ch| !pat(ch)).unwrap_or(offset_line.len());
+        &self.line_buf[self.line_offset + offset..][..len]
+    }
+
+    fn read_numeric_offset<'a>(&'a self, offset: usize) -> &'a str {
+        let offset = offset.min(self.line_buf.len() - self.line_offset);
+        let offset_line = &self.line_buf[self.line_offset + offset..];
+        let len = offset_line.find(|ch: char| !(ch.is_numeric() || ch == '_')).unwrap_or(offset_line.len());
+        &self.line_buf[self.line_offset + offset..][..len]
+    }
+
+    fn read_numeric_hex_offset<'a>(&'a self, offset: usize) -> &'a str {
+        let offset = offset.min(self.line_buf.len() - self.line_offset);
+        let offset_line = &self.line_buf[self.line_offset + offset..];
+        let len = offset_line.find(|ch: char| !(ch.is_numeric() || ('a'..='f').contains(&ch) || ('A'..='F').contains(&ch) || ch == '_')).unwrap_or(offset_line.len());
+        &self.line_buf[self.line_offset + offset..][..len]
     }
 
     fn consume(&mut self, num_bytes: usize) -> usize {
@@ -273,5 +297,212 @@ impl Lexer {
 
         self.add_whitespace_trivia(TriviaElem::Whitespace(whitespace));
         self.consume(whitespace_len);
+    }
+
+    fn parse_numeric_literal(&mut self) {
+        let line = self.cur_line();
+        if line.starts_with("0b") {
+            self.parse_prefixed_literal(LiteralSegment::Binary, |s| Literal::Binary(s))
+        } else if line.starts_with("0o") {
+            self.parse_prefixed_literal(LiteralSegment::Octal, |s| Literal::Octal(s))
+        } else if line.starts_with("0x") {
+            self.parse_hexadecimal_literal()
+        } else {
+            self.parse_decimal_literal()
+        }
+    }
+
+    fn parse_decimal_literal(&mut self) {
+        let integral = self.read_numeric_offset(0).to_string();
+        self.check_for_literal_error(&integral, LiteralSegment::DecIntegral);
+
+        let mut cur_offset = integral.len();
+        let fraction = if self.offset_from_cur_line(cur_offset).starts_with('.') {
+            cur_offset += 1;
+            let frac = self.read_numeric_offset(cur_offset).to_string();
+            self.check_for_literal_error(&frac, LiteralSegment::DecFraction);
+
+            frac
+        } else {
+            String::new()
+        };
+        cur_offset += fraction.len();
+
+        let (exponent, exp_len) = if self.offset_from_cur_line(cur_offset).starts_with('e') {
+            cur_offset += 1;
+            let tmp = self.offset_from_cur_line(cur_offset);
+            let exp_kind = match tmp.as_bytes()[0] {
+                b'+' => {
+                    cur_offset += 1;
+                    '+'
+                },
+                b'-' => {
+                    cur_offset += 1;
+                    '-'
+                },
+                _ => '\0',
+            };
+
+            let exp = self.read_numeric_offset(cur_offset).to_string();
+            self.check_for_literal_error(&exp, LiteralSegment::DecExponent);
+
+            let exp_len = exp.len();
+            let exp = match exp_kind {
+                '+' => Exponent::Pos(exp),
+                '-' => Exponent::Neg(exp),
+                _   => Exponent::Some(exp),
+            };
+            (exp, exp_len)
+        } else {
+            (Exponent::None, 0)
+        };
+
+        let meta = self.consume_and_get_meta(cur_offset + exp_len);
+
+        let lit = if !fraction.is_empty() || matches!(exponent, Exponent::Neg(_)) {
+            Literal::DecimalFloat {
+                integral,
+                fraction,
+                exponent,
+            }
+        } else {
+            Literal::Decimal {
+                integral,
+                exponent,
+            }
+        };
+
+        self.add_token(Token::Literal(lit), meta);
+    }
+
+    // Even when we error, just return the token, as we could try to compile further to collect other errors
+    fn check_for_literal_error(&mut self, lit_str: &str, segment: LiteralSegment) {
+        if lit_str.starts_with('_') {
+            self.errors.push(LexError::Literal(LiteralError::LeadingUnderscore(segment)));
+        }
+        if lit_str.ends_with('_') {
+            self.errors.push(LexError::Literal(LiteralError::TrailingUnderscore(segment)));
+        }
+
+        // Handles numeric characters not in the allowed pattern
+        let char_validate = match segment {
+            LiteralSegment::DecIntegral |
+            LiteralSegment::DecFraction |
+            LiteralSegment::DecExponent => |ch| ('0'..='9').contains(&ch),
+            LiteralSegment::Binary      => |ch| ch == '0' || ch =='1',
+            LiteralSegment::Octal       => |ch| ('0'..='7').contains(&ch),
+            LiteralSegment::HexIntegral |
+            LiteralSegment::HexFraction |
+            LiteralSegment::HexExponent => |ch| ('0'..='9').contains(&ch) || ('a'..='f').contains(&ch) || ('A'..='F').contains(&ch),
+        };
+
+        for ch in lit_str.chars().filter(|ch| *ch != '_' && !char_validate(*ch)) {
+            self.errors.push(LexError::Literal(LiteralError::UnsupportedDigit(segment, ch)));
+        }
+    }
+
+    fn parse_prefixed_literal<F>(&mut self, segment: LiteralSegment, gen_lit: F) where 
+        F: Fn(String) -> Literal,
+    {
+        let lit_str = self.read_numeric_offset(2).to_string();
+        self.check_for_literal_error(&lit_str, segment);
+
+        let lit_len = lit_str.len();
+
+        let token = Token::Literal(gen_lit(lit_str));
+        let meta = self.consume_and_get_meta(lit_len + 2);
+        self.add_token(token, meta);
+    }
+
+    fn parse_hexadecimal_literal(&mut self) {
+        let mut cur_offset = 2; // '0x' prefix
+        let integral = self.read_numeric_hex_offset(cur_offset).to_string();
+        self.check_for_literal_error(&integral, LiteralSegment::HexIntegral);
+
+        cur_offset += integral.len();
+        let fraction = if self.offset_from_cur_line(cur_offset).starts_with('.') {
+            cur_offset += 1;
+            let frac = self.read_numeric_hex_offset(cur_offset).to_string();
+            self.check_for_literal_error(&frac, LiteralSegment::HexFraction);
+
+            frac
+        } else {
+            String::new()
+        };
+        cur_offset += fraction.len();
+
+        let (exponent, exp_len) = if self.offset_from_cur_line(cur_offset).starts_with('p') {
+            cur_offset += 1;
+            if self.offset_from_cur_line(cur_offset).starts_with('x') {
+                cur_offset += 1;
+                let tmp = self.offset_from_cur_line(cur_offset);
+                let exp_kind = match tmp.as_bytes()[0] {
+                    b'+' => {
+                        cur_offset += 1;
+                        '+'
+                    },
+                    b'-' => {
+                        cur_offset += 1;
+                        '-'
+                    },
+                    _ => '\0',
+                };
+
+                let exp = self.read_numeric_hex_offset(cur_offset).to_string();
+                self.check_for_literal_error(&exp, LiteralSegment::HexExponent);
+
+                let exp_len = exp.len();
+                let exp = match exp_kind {
+                    '+' => HexExponent::HexPos(exp),
+                    '-' => HexExponent::HexNeg(exp),
+                    _   => HexExponent::Hex(exp),
+                };
+                (exp, exp_len)
+            } else { 
+                let tmp = self.offset_from_cur_line(cur_offset);
+                let exp_kind = match tmp.as_bytes()[0] {
+                    b'+' => {
+                        cur_offset += 1;
+                        '+'
+                    },
+                    b'-' => {
+                        cur_offset += 1;
+                        '-'
+                    },
+                    _ => '\0',
+                };
+                
+                let exp = self.read_numeric_hex_offset(cur_offset).to_string();
+                self.check_for_literal_error(&exp, LiteralSegment::DecExponent);
+                
+                let exp_len = exp.len();
+                let exp = match exp_kind {
+                    '+' => HexExponent::DecPos(exp),
+                    '-' => HexExponent::DecNeg(exp),
+                    _   => HexExponent::Dec(exp),
+                };
+                (exp, exp_len)
+            }
+        } else {
+            (HexExponent::None, 0)
+        };
+
+        let meta = self.consume_and_get_meta(cur_offset + exp_len);
+
+        let lit = if !fraction.is_empty() || exponent != HexExponent::None {
+            if exponent == HexExponent::None {
+                self.errors.push(LexError::Literal(LiteralError::HexFloatNoExp));
+            }
+
+            Literal::HexadecimalFloat {
+                integral,
+                fraction,
+                exponent,
+            }
+        } else {
+            Literal::Hexadecimal(integral)
+        };
+
+        self.add_token(Token::Literal(lit), meta);
     }
 }
