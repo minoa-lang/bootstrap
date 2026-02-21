@@ -3,6 +3,7 @@
 use std::fmt;
 
 pub mod log;
+pub mod time;
 
 
 #[derive(Clone, Copy, Debug)]
