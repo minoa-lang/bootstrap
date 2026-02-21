@@ -1,6 +1,8 @@
 #![allow(unused)]
 
-use std::fmt;
+use std::{
+    fmt, fs::{self, File}, io, path::Path
+};
 
 pub mod log;
 pub mod time;
@@ -37,3 +39,16 @@ cfg_if::cfg_if!{
         pub use crate::os::default::get_local_datetime;
     }
 }
+
+
+pub fn create_file_and_dirs<P: ?Sized + AsRef<Path>>(path: &P) -> io::Result<File> {
+    fn inner(path: &Path) -> io::Result<File> {
+        match path.parent() {
+            Some(parent_dir) => fs::create_dir_all(parent_dir)?,
+            None => ()
+        }
+        File::create(path) 
+    }
+    inner(path.as_ref())
+}
+

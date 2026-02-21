@@ -7,6 +7,10 @@ edition = "2024"
 bootstrap-macros = { path = "bootstrap_macros/" }
 cfg-if = "1.0.4"
 parking_lot = "0.12.5"
+clap = { version = "4.5.59", features = [
+    "default",
+    "derive"
+] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
