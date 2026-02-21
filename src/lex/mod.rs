@@ -1,0 +1,277 @@
+#![allow(unused)]
+
+use std::{
+    collections::HashMap, fmt, fs::File, io::{self, BufRead, BufReader}, mem, ops::RangeBounds
+};
+
+use crate::tokens::{is_whitespace_trivia, Punctuation, ReservedKeyword, Span, StrongKeyword, Token, TokenMeta, TokenStream, Trivia, TriviaElem, WeakKeyword};
+
+pub enum LexError {
+    IO(io::Error),
+}
+
+impl fmt::Display for LexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LexError::IO(err) => write!(f, "Lexer file io: {err}"),
+        }
+    }
+}
+
+pub struct Lexer {
+    reader:         BufReader<File>,
+
+    line:           u32,
+    column:         u32,
+    byte_idx:       usize,
+    char_idx:       usize,
+
+    kw_map:         HashMap<&'static str, Token>,
+    punct_map:      HashMap<&'static str, Token>,
+
+    trivia:         Trivia,
+    toks:           TokenStream,
+
+    line_buf:       String,
+    line_offset:    usize,
+    line_has_token: bool,
+
+    errors:         Vec<LexError>,
+}
+
+impl Lexer {
+    const LINE_BUF_MIN_SIZE: usize = 4096;
+
+    pub fn new(source_file: File) -> Self {
+        let reader = BufReader::new(source_file);
+
+        // Inefficient, but easy
+        let mut kw_map = HashMap::new();
+        for kw in StrongKeyword::for_all() {
+            kw_map.insert(kw.as_str(), Token::StrongKw(kw));
+        }
+        for kw in ReservedKeyword::for_all() {
+            kw_map.insert(kw.as_str(), Token::ReservedKw(kw));
+        }
+        for kw in WeakKeyword::for_all() {
+            kw_map.insert(kw.as_str(), Token::WeakKw(kw));
+        }
+
+        let mut punct_map = HashMap::new();
+        for punct in Punctuation::for_all() {
+            if let Punctuation::Other(_) = punct { continue; }
+            punct_map.insert(punct.as_str(), Token::Punct(punct));
+        }
+
+        Self {
+            reader,
+            line: 0,
+            column: 0,
+            byte_idx: 0,
+            char_idx: 0,
+            kw_map,
+            punct_map,
+            trivia: Trivia::new(),
+            toks: TokenStream::new(),
+            line_buf: String::with_capacity(Self::LINE_BUF_MIN_SIZE),
+            line_offset: 0,
+            line_has_token: false,
+            errors: Vec::new(),
+        }
+    }
+
+    pub fn lex(&mut self) -> Result<TokenStream, Vec<LexError>> {
+        let mut line = String::new();
+
+        while self.read_line()? {
+            let mut idx = 0;
+            while let Some(ch) = self.peek_char() {
+
+                match ch {
+                    _ if is_whitespace_trivia(ch) => self.parse_whitespace(&line, idx),
+                    _ if ch.is_alphabetic() => self.parse_kw_or_name(),
+                    _ => self.parse_punctuation(),
+                }
+            }
+        }
+
+        if !self.errors.is_empty() {
+            Err(mem::take(&mut self.errors))
+        } else {
+            Ok(mem::replace(&mut self.toks, TokenStream::new()))
+        }
+    }
+
+    fn cur_line(&self) -> &str {
+        &self.line_buf[self.line_offset..]
+    }
+
+    fn offset_from_cur_line(&self, offset: usize) -> &str {
+        if self.line_offset + offset >= self.line_buf.len() {
+            return "";
+        }
+        &self.line_buf[self.line_offset + offset..]
+    }
+
+    /// Reads a line up to (and including) the next '\n'
+    fn read_line(&mut self) -> Result<bool, Vec<LexError>> {
+        // bookkeeping
+        self.line_offset = 0;
+        self.line += 1;
+        self.column = 1;
+        self.line_has_token = false;
+
+        // actual read
+        self.line_buf.clear();
+        match self.reader.read_line(&mut self.line_buf) {
+            Ok(num_bytes) => Ok(num_bytes != 0),
+            Err(err) => Err(vec![LexError::IO(err)]),
+        }
+    }
+
+    fn peek_char(&self) -> Option<char> {
+        if self.line_offset >= self.line_buf.len() {
+            return None;
+        }
+        let line = &self.line_buf[self.line_offset..];
+        line.chars().next()
+    }
+ 
+    fn read<'a, P: FnMut(char) -> bool>(&'a self, mut pat: P) -> &'a str {
+        let line = &self.line_buf[self.line_offset..];
+        let len = line.find(|ch| !pat(ch)).unwrap_or(line.len());
+        &line[..len]
+    }
+
+    fn consume(&mut self, num_bytes: usize) -> usize {
+        let num_bytes = num_bytes.min(self.line_buf.len() - self.line_offset);
+        let line = &self.line_buf[self.line_offset..][..num_bytes];
+        let num_chars = line.chars().count();
+
+        self.consume_cnt(num_bytes, num_chars);
+
+        num_chars
+    }
+
+    fn consume_and_get_meta(&mut self, num_bytes: usize) -> TokenMeta {
+        let num_bytes = num_bytes.min(self.line_buf.len() - self.line_offset);
+        let line = &self.line_buf[self.line_offset..][..num_bytes];
+        let num_chars = line.chars().count();
+
+        let meta = TokenMeta {
+            span: Span {
+                line: self.line,
+                column: self.column,
+                byte_offset: self.byte_idx,
+                byte_len: num_bytes as u32,
+                char_offset: self.char_idx,
+                char_len: num_chars as u32,
+            },
+            trivia: mem::take(&mut self.trivia),
+        };
+
+        self.consume_cnt(num_bytes, num_chars);
+
+        meta
+    }
+
+    fn consume_cnt(&mut self, num_bytes: usize, num_chars: usize) {
+        self.line_offset += num_bytes;
+        self.byte_idx += num_bytes;
+        self.column += num_chars as u32;
+        self.char_idx += num_chars;
+    }
+
+    fn add_whitespace_trivia(&mut self, trivia: TriviaElem) {
+        if self.line_offset > 0 && self.line_has_token {
+            let Some(meta) = self.toks.last_meta_mut() else { unreachable!() };
+            meta.trivia.add_trailing(trivia);
+        } else {
+            self.trivia.add_leading(trivia);
+        }
+    }
+
+    fn add_token(&mut self, token: Token, meta: TokenMeta) {
+        self.line_has_token = true;
+        self.toks.push(token, meta);
+    }
+
+    // NOTE: while this does not fully follow the reference, most commonly used characters should be handled correctly
+    fn parse_kw_or_name(&mut self) {
+        struct PatchMapEntry {
+            orig: Token,
+            punct: Punctuation,
+            trailing_punct: bool,
+            token: Token,
+        }
+
+        const PATCH_MAP: [PatchMapEntry; 8] = [
+            PatchMapEntry { orig: Token::StrongKw(StrongKeyword::As) , punct: Punctuation::Question, trailing_punct: true , token: Token::StrongKw(StrongKeyword::AsQuestion) },
+            PatchMapEntry { orig: Token::StrongKw(StrongKeyword::As) , punct: Punctuation::Exclaim , trailing_punct: true , token: Token::StrongKw(StrongKeyword::AsExclaim) },
+            PatchMapEntry { orig: Token::StrongKw(StrongKeyword::Let), punct: Punctuation::Question, trailing_punct: true , token: Token::StrongKw(StrongKeyword::LetQuestion) },
+            PatchMapEntry { orig: Token::StrongKw(StrongKeyword::Let), punct: Punctuation::Exclaim , trailing_punct: true , token: Token::StrongKw(StrongKeyword::LetExclaim) },
+            PatchMapEntry { orig: Token::StrongKw(StrongKeyword::Try), punct: Punctuation::Question, trailing_punct: true , token: Token::StrongKw(StrongKeyword::TryQuestion) },
+            PatchMapEntry { orig: Token::StrongKw(StrongKeyword::Try), punct: Punctuation::Exclaim , trailing_punct: true , token: Token::StrongKw(StrongKeyword::TryExclaim) },
+            PatchMapEntry { orig: Token::StrongKw(StrongKeyword::Is) , punct: Punctuation::Exclaim , trailing_punct: false, token: Token::StrongKw(StrongKeyword::NotIs) },
+            PatchMapEntry { orig: Token::StrongKw(StrongKeyword::In) , punct: Punctuation::Exclaim , trailing_punct: false, token: Token::StrongKw(StrongKeyword::NotIn) },
+        ];
+
+        let mut name = self.read(|ch| ch.is_alphanumeric() || ch == '_');
+        let mut name_len = name.len();
+        let token = match self.kw_map.get(name).cloned() {
+            Some(mut tok) => {
+                // patching special tokens
+                for entry in PATCH_MAP.iter().filter(|entry| entry.orig == tok) {
+                    if entry.trailing_punct {
+                        if self.offset_from_cur_line(name_len).starts_with(entry.punct.as_str()) {
+                            continue;
+                        }
+                        tok = entry.token.clone();
+                        name_len += 1;
+                        break;
+                    } else {
+                        let Some(prev_tok) = self.toks.last_mut() else { continue; };
+                        let Token::Punct(punct) = prev_tok else { continue; };
+                        if *punct != entry.punct { continue; }
+                        *prev_tok = entry.token.clone();
+                        
+                        let char_len = self.consume(name_len);
+                        let Some(last_meta) = self.toks.last_meta_mut() else { unreachable!() };
+                        last_meta.span.byte_len += name_len as u32;
+                        last_meta.span.char_len += char_len as u32;
+                        return;
+                    }
+                }
+
+                tok
+            },
+            None => {
+                Token::Name(name.to_string())
+            },
+        };
+
+        let meta = self.consume_and_get_meta(name_len);
+        self.add_token(token, meta);
+    }
+
+    fn parse_punctuation(&mut self) {
+        let punct = self.read(|ch| !(is_whitespace_trivia(ch) || ch.is_alphanumeric()));
+
+        let token = match self.punct_map.get(punct) {
+            Some(tok) => tok.clone(),
+            None => Token::Punct(Punctuation::Other(punct.to_string())),
+        };
+
+        let meta = self.consume_and_get_meta(punct.len());
+        self.add_token(token, meta);
+    }
+
+    fn parse_whitespace(&mut self, line: &str, idx: usize) {
+        let line = &self.line_buf[self.line_offset..];
+        let whitespace = self.read(is_whitespace_trivia).to_string();
+        let whitespace_len = whitespace.len();
+
+        self.add_whitespace_trivia(TriviaElem::Whitespace(whitespace));
+        self.consume(whitespace_len);
+    }
+}
