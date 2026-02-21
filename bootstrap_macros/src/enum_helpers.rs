@@ -54,7 +54,8 @@ pub fn enum_utils(attr: proc_macro::TokenStream, ast: DeriveInput) -> TokenStrea
     let mut variant_full_patterns = Vec::new();
     let mut variant_fmt_args = Vec::new();
     let mut variant_fmt_discards = Vec::new();
-    let mut variant_vals = Vec::new();
+    let mut variant_discriminants = Vec::new();
+    let mut variant_def_init = Vec::new();
     let mut has_any_fmt = false;
 
     // Different names in case future features need to use collect this
@@ -108,14 +109,34 @@ pub fn enum_utils(attr: proc_macro::TokenStream, ast: DeriveInput) -> TokenStrea
                         Ok(idx) => idx as usize,
                         Err(err) => return err,
                     };
-                    variant_vals.push(idx); 
+                    variant_discriminants.push(idx); 
                     cur_idx = idx;
                 },
                 None => {
-                    variant_vals.push(cur_idx);
+                    variant_discriminants.push(cur_idx);
                     cur_idx += 1;
                 },
             }
+
+            let def_val = match &variant.fields {
+                syn::Fields::Named(var_fields) => {
+                    let mut fields = Vec::new();
+                    for field in &var_fields.named {
+                        let ident = field.ident.as_ref().unwrap();
+                        fields.push(quote!{ #ident: Default::default(), });
+                    }
+                    quote! { Self::#ident{#(#fields),*} }
+                },
+                syn::Fields::Unnamed(var_fields) => {
+                    let mut fields = Vec::new();
+                    for _ in &var_fields.unnamed {
+                        fields.push(quote!{ Default::default(), });
+                    }
+                    quote! { Self::#ident(#(#fields),*) }
+                },
+                syn::Fields::Unit => quote!{ Self::#ident },
+            };
+            variant_def_init.push(def_val);
         }
 
         if collect_names {
@@ -199,7 +220,7 @@ pub fn enum_utils(attr: proc_macro::TokenStream, ast: DeriveInput) -> TokenStrea
     let from_idx = from_idx.then(|| quote! {
         pub fn from_idx(idx: usize) -> Option<Self> {
             match idx {
-                #(#variant_vals => Some(#variant_simple_patterns),)*
+                #(#variant_discriminants => Some(#variant_def_init),)*
                 _ => None,
             }
         }
