@@ -36,6 +36,40 @@ pub enum HexExponent {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
+#[enum_utils(display)]
+pub enum EscapeSequence {
+    #[fmt("\\0")]
+    Null,
+    #[fmt("\\t")]
+    Tab,
+    #[fmt("\\n")]
+    Newline,
+    #[fmt("\\r")]
+    CariageReturn,
+    #[fmt("\\\"")]
+    DblQuote,
+    #[fmt("\\'")]
+    Quote,
+    #[fmt("\\\\")]
+    Backslash,
+    #[fmt("\\r\\n or \\n")]
+    SystemNewline,
+    #[fmt("\\x{_0:X}")]
+    Hex(u8),
+    #[fmt("\\u{{{_0:X}}}")]
+    Unicode(u32),
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+#[enum_utils(display)]
+pub enum CharLiteral {
+    #[fmt("{_0}")]
+    Char(char),
+    #[fmt("{_0}")]
+    Escape(EscapeSequence),
+}
+ 
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
 #[enum_utils(as_str(snake_case))]
 pub enum Literal {
     Decimal{
@@ -54,7 +88,9 @@ pub enum Literal {
         integral: String,
         fraction: String,
         exponent: HexExponent
-    }
+    },
+    Char(CharLiteral),
+    String(String),
 }
 
 impl fmt::Display for Literal {
@@ -79,7 +115,9 @@ impl fmt::Display for Literal {
                 }
                 write!(f, "{exponent}")?;
                 Ok(())
-            }
+            },
+            Literal::Char(ch) => write!(f, "{ch}"),
+            Literal::String(s) => f.write_str(s)
         }
     }
 }
@@ -116,4 +154,10 @@ pub enum LiteralError {
     UnsupportedDigit(LiteralSegment, char),
     #[fmt("A hexadecimal floats must contain an exponent")]
     HexFloatNoExp,
+    #[fmt("Invalid character literal: {_0}")]
+    InvalidCharacterLiteral(String),
+    #[fmt("Unexpected escape sequence '{_0}' found")]
+    UnexpectEscape(char),
+    #[fmt("Invalid unicode escape: {_0}")]
+    InvalidUnicodeEscape(String)
 }

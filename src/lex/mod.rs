@@ -1,14 +1,22 @@
 #![allow(unused)]
 
 use std::{
-    collections::HashMap, fmt, fs::File, io::{self, BufRead, BufReader}, mem, ops::RangeBounds
+    collections::HashMap,
+    fmt,
+    fs::File,
+    io::{self, BufRead, BufReader},
+    mem,
+    num::ParseIntError,
+    ops::RangeBounds
 };
 
-use crate::tokens::{is_whitespace_trivia, Exponent, HexExponent, Literal, LiteralError, LiteralSegment, Punctuation, ReservedKeyword, Span, StrongKeyword, Token, TokenMeta, TokenStream, Trivia, TriviaElem, WeakKeyword};
+use crate::tokens::{is_whitespace_trivia, CharLiteral, EscapeSequence, Exponent, HexExponent, Literal, LiteralError, LiteralSegment, Punctuation, ReservedKeyword, Span, StrongKeyword, Token, TokenMeta, TokenStream, Trivia, TriviaElem, WeakKeyword};
 
 pub enum LexError {
     IO(io::Error),
     Literal(LiteralError),
+    IntParse(ParseIntError),
+    UnexpectedEOL,
 }
 
 impl fmt::Display for LexError {
@@ -16,6 +24,8 @@ impl fmt::Display for LexError {
         match self {
             LexError::IO(err) => write!(f, "Lexer file io: {err}"),
             LexError::Literal(err) => write!(f, "Lex error while lexing literal: {err}"),
+            LexError::IntParse(err) => write!(f, "Lex error when parsing int: {err}"),
+            LexError::UnexpectedEOL => write!(f, "Unexpected end-of-line during lexing"),
         }
     }
 }
@@ -93,6 +103,7 @@ impl Lexer {
                     _ if is_whitespace_trivia(ch) => self.lex_whitespace(&line, idx),
                     _ if ch.is_alphabetic() => self.lex_kw_or_name(),
                     _ if ch.is_numeric() => self.lex_numeric_literal(),
+                    '\'' => self.lex_char(),
                     _ => self.lex_punctuation(),
                 }
             }
@@ -104,6 +115,8 @@ impl Lexer {
             Ok(mem::replace(&mut self.toks, TokenStream::new()))
         }
     }
+
+    // UTILITIES
 
     fn cur_line(&self) -> &str {
         &self.line_buf[self.line_offset..]
@@ -177,6 +190,13 @@ impl Lexer {
         num_chars
     }
 
+    fn consume_line(&mut self) -> usize {
+        let line = self.cur_line();
+        let num_chars = line.chars().count();
+        self.consume_cnt(line.len(), num_chars);
+        num_chars
+    }
+
     fn consume_and_get_meta(&mut self, num_bytes: usize) -> TokenMeta {
         let num_bytes = num_bytes.min(self.line_buf.len() - self.line_offset);
         let line = &self.line_buf[self.line_offset..][..num_bytes];
@@ -199,6 +219,12 @@ impl Lexer {
         meta
     }
 
+    fn consume_invalid_char(&mut self) {
+        let line = self.offset_from_cur_line(1);
+        let num_bytes = line.find('\'').map_or(line.len(), |len| len + 1);
+        self.consume(num_bytes);
+    }
+
     fn consume_cnt(&mut self, num_bytes: usize, num_chars: usize) {
         self.line_offset += num_bytes;
         self.byte_idx += num_bytes;
@@ -219,6 +245,8 @@ impl Lexer {
         self.line_has_token = true;
         self.toks.push(token, meta);
     }
+
+    // LEXING
 
     // NOTE: while this does not fully follow the reference, most commonly used characters should be handled correctly
     fn lex_kw_or_name(&mut self) {
@@ -504,5 +532,124 @@ impl Lexer {
         };
 
         self.add_token(Token::Literal(lit), meta);
+    }
+
+    fn lex_char(&mut self) {
+        if self.offset_from_cur_line(1).starts_with('\\') {
+            if let Some((sequence, len)) = self.lex_escape_sequence(1) {
+                let meta = self.consume_and_get_meta(len);
+                let token = Token::Literal(Literal::Char(CharLiteral::Escape(sequence)));
+                self.add_token(token, meta);
+            }
+        } else {
+            let mut chars = self.offset_from_cur_line(1).chars();
+            let Some(ch) = chars.next() else {
+                self.errors.push(LexError::UnexpectedEOL);
+                self.consume_line();
+                return;
+            };
+
+            match chars.next() {
+                Some(ch) => if ch != '\'' {
+                    self.errors.push(LexError::Literal(LiteralError::InvalidCharacterLiteral("Literal was not closed with a `'`".to_string())));
+                    self.consume_line();
+                    return;
+                },
+                None => {
+                    self.errors.push(LexError::UnexpectedEOL);
+                    self.consume_line();
+                    return;
+                },
+            }
+
+            let meta = self.consume_and_get_meta(ch.len_utf8() + 2);
+            let token = Token::Literal(Literal::Char(CharLiteral::Char(ch)));
+            self.add_token(token, meta);
+        }
+    }
+
+    // Within string literals, this is used only to validate the actual sequence
+
+    /// Lexes an escape sequence at a given offset, the offset is the location of the `\``
+    /// 
+    ///  Returns the escape sequence and length in bytes
+    fn lex_escape_sequence(&mut self, offset: usize) -> Option<(EscapeSequence, usize)> {
+        let sequence = self.offset_from_cur_line(offset + 1);
+        let mut chars = sequence.chars();
+        let Some(ch) = chars.next() else {
+            self.errors.push(LexError::UnexpectedEOL);
+            self.consume_line();
+            return None;
+        };
+
+        match ch {
+            '0'  => Some((EscapeSequence::Null, 4)),
+            't'  => Some((EscapeSequence::Tab, 4)),
+            'n'  => Some((EscapeSequence::Newline, 4)),
+            'r'  => Some((EscapeSequence::CariageReturn, 4)),
+            '"'  => Some((EscapeSequence::DblQuote, 4)),
+            '\'' => Some((EscapeSequence::Quote, 4)),
+            '\\' => Some((EscapeSequence::Backslash, 4)),
+            'p'  => Some((EscapeSequence::SystemNewline, 4)),
+            'x'  => {
+                
+                let hex_val = match u8::from_str_radix(&sequence[1..3], 16) {
+                    Ok(val) => val,
+                    Err(err) => {
+                        self.errors.push(LexError::IntParse(err));
+                        self.consume_invalid_char();
+                        return None;
+                    },
+                };
+                Some((EscapeSequence::Hex(hex_val), 6))
+            },
+            'u' => {
+                if chars.next() != Some('{') {
+                    self.errors.push(LexError::Literal(LiteralError::InvalidUnicodeEscape("No leading '{' found after 'u'".to_string())));
+                    self.consume_invalid_char();
+                    return None;
+                }
+
+                let inner_sequence = &sequence[2..];
+                let code_end = inner_sequence.find('}').unwrap_or(inner_sequence.len());
+                let code = &inner_sequence[..code_end];
+
+                if code_end > 8 {
+                    self.errors.push(LexError::Literal(LiteralError::InvalidUnicodeEscape("Only 8 hex digits are allowed".to_string())));
+                    self.consume_invalid_char();
+                    return None;
+                }
+
+                let hex_val = match u32::from_str_radix(code, 16) {
+                    Ok(val) => val,
+                    Err(err) => {
+                        self.errors.push(LexError::IntParse(err));
+                        self.consume_invalid_char();
+                        return None;
+                    },
+                };
+
+                let mut chars = inner_sequence[code_end..].chars();
+                if chars.next() != Some('}') {
+                    self.errors.push(LexError::Literal(LiteralError::InvalidUnicodeEscape("No trailing '}' found".to_string())));
+                    self.consume_invalid_char();
+                    return None;
+                }
+                if chars.next() != Some('\'') {
+                    self.errors.push(LexError::Literal(LiteralError::InvalidUnicodeEscape("Character literal was not ended on a `'`".to_string())));
+                    self.consume_invalid_char();
+                    return None;
+                }
+
+                // "'\u{" + code + "}'"
+                let len = 4 + code.len() + 2;
+
+                Some((EscapeSequence::Unicode(hex_val), len))
+            }
+            _ => {
+                self.errors.push(LexError::Literal(LiteralError::UnexpectEscape(ch)));
+                None
+            }
+        }
     }
 }
