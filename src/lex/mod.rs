@@ -90,10 +90,10 @@ impl Lexer {
             while let Some(ch) = self.peek_char() {
 
                 match ch {
-                    _ if is_whitespace_trivia(ch) => self.parse_whitespace(&line, idx),
-                    _ if ch.is_alphabetic() => self.parse_kw_or_name(),
-                    _ if ch.is_numeric() => self.parse_numeric_literal(),
-                    _ => self.parse_punctuation(),
+                    _ if is_whitespace_trivia(ch) => self.lex_whitespace(&line, idx),
+                    _ if ch.is_alphabetic() => self.lex_kw_or_name(),
+                    _ if ch.is_numeric() => self.lex_numeric_literal(),
+                    _ => self.lex_punctuation(),
                 }
             }
         }
@@ -221,7 +221,7 @@ impl Lexer {
     }
 
     // NOTE: while this does not fully follow the reference, most commonly used characters should be handled correctly
-    fn parse_kw_or_name(&mut self) {
+    fn lex_kw_or_name(&mut self) {
         struct PatchMapEntry {
             orig: Token,
             punct: Punctuation,
@@ -278,7 +278,7 @@ impl Lexer {
         self.add_token(token, meta);
     }
 
-    fn parse_punctuation(&mut self) {
+    fn lex_punctuation(&mut self) {
         let punct = self.read(|ch| !(is_whitespace_trivia(ch) || ch.is_alphanumeric()));
 
         let token = match self.punct_map.get(punct) {
@@ -290,7 +290,7 @@ impl Lexer {
         self.add_token(token, meta);
     }
 
-    fn parse_whitespace(&mut self, line: &str, idx: usize) {
+    fn lex_whitespace(&mut self, line: &str, idx: usize) {
         let line = &self.line_buf[self.line_offset..];
         let whitespace = self.read(is_whitespace_trivia).to_string();
         let whitespace_len = whitespace.len();
@@ -299,20 +299,20 @@ impl Lexer {
         self.consume(whitespace_len);
     }
 
-    fn parse_numeric_literal(&mut self) {
+    fn lex_numeric_literal(&mut self) {
         let line = self.cur_line();
         if line.starts_with("0b") {
-            self.parse_prefixed_literal(LiteralSegment::Binary, |s| Literal::Binary(s))
+            self.lex_prefixed_literal(LiteralSegment::Binary, |s| Literal::Binary(s))
         } else if line.starts_with("0o") {
-            self.parse_prefixed_literal(LiteralSegment::Octal, |s| Literal::Octal(s))
+            self.lex_prefixed_literal(LiteralSegment::Octal, |s| Literal::Octal(s))
         } else if line.starts_with("0x") {
-            self.parse_hexadecimal_literal()
+            self.lex_hexadecimal_literal()
         } else {
-            self.parse_decimal_literal()
+            self.lex_decimal_literal()
         }
     }
 
-    fn parse_decimal_literal(&mut self) {
+    fn lex_decimal_literal(&mut self) {
         let integral = self.read_numeric_offset(0).to_string();
         self.check_for_literal_error(&integral, LiteralSegment::DecIntegral);
 
@@ -401,7 +401,7 @@ impl Lexer {
         }
     }
 
-    fn parse_prefixed_literal<F>(&mut self, segment: LiteralSegment, gen_lit: F) where 
+    fn lex_prefixed_literal<F>(&mut self, segment: LiteralSegment, gen_lit: F) where 
         F: Fn(String) -> Literal,
     {
         let lit_str = self.read_numeric_offset(2).to_string();
@@ -414,7 +414,7 @@ impl Lexer {
         self.add_token(token, meta);
     }
 
-    fn parse_hexadecimal_literal(&mut self) {
+    fn lex_hexadecimal_literal(&mut self) {
         let mut cur_offset = 2; // '0x' prefix
         let integral = self.read_numeric_hex_offset(cur_offset).to_string();
         self.check_for_literal_error(&integral, LiteralSegment::HexIntegral);
