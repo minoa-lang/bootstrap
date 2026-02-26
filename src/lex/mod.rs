@@ -101,10 +101,11 @@ impl Lexer {
                 match ch {
                     _ if is_whitespace_trivia(ch) => self.lex_whitespace(&line, idx),
                     _ if ch.is_alphabetic() => self.lex_kw_or_name(),
-                    _ if ch.is_numeric() => self.lex_numeric_literal(),
+                    _ if ch.is_ascii_digit() => self.lex_numeric_literal(),
                     '\'' => self.lex_char(),
                     '/'  => self.lex_comment_or_punctuation(),
                     '_'  => self.let_name_or_underscore(),
+                    '.'  => self.lex_dot(),
                     _    => self.lex_punctuation(),
                 }
             }
@@ -236,6 +237,19 @@ impl Lexer {
         }
     }
 
+    fn lex_dot(&mut self) {
+        let mut chars = self.offset_from_cur_line(1).chars();
+        if let Some(ch) = chars.next() && ch.is_ascii_digit() {
+            let dot_token = Token::Punct(Punctuation::Dot);
+            let dot_meta = self.consume_and_get_meta(1);
+            self.add_token(dot_token, dot_meta);
+
+            self.lex_decimal_literal(true);
+        } else {
+            self.lex_punctuation();
+        }
+    }
+
     fn lex_whitespace(&mut self, line: &str, idx: usize) {
         let line = &self.line_buf[self.line_offset..];
         let whitespace = self.read(is_whitespace_trivia).to_string();
@@ -293,17 +307,24 @@ impl Lexer {
         } else if line.starts_with("0x") {
             self.lex_hexadecimal_literal()
         } else {
-            self.lex_decimal_literal()
+            self.lex_decimal_literal(false)
         }
     }
 
-    fn lex_decimal_literal(&mut self) {
+    fn lex_decimal_literal(&mut self, int_only: bool) {
         let integral = self.read_numeric_offset(0).to_string();
         self.check_for_literal_error(0, &integral, LiteralSegment::DecIntegral);
 
+        if int_only {
+            let meta = self.consume_and_get_meta(integral.len());
+            let token = Token::Literal(Literal::Decimal { integral: integral, exponent: Exponent::None });
+            self.add_token(token, meta);
+            return;
+        }
+
         let mut cur_offset = integral.len();
         let fraction_str = self.offset_from_cur_line(cur_offset);
-        let fraction = if fraction_str.starts_with('.') && fraction_str[1..].starts_with(char::is_numeric) {
+        let fraction = if fraction_str.starts_with('.') && fraction_str[1..].starts_with(char::is_ascii_digit) {
             cur_offset += 1;
             let frac = self.read_numeric_offset(cur_offset).to_string();
             self.check_for_literal_error(cur_offset, &frac, LiteralSegment::DecFraction);
@@ -315,7 +336,7 @@ impl Lexer {
         cur_offset += fraction.len();
 
         let exponent_str = self.offset_from_cur_line(cur_offset);
-        let (exponent, exp_len) = 'exp_lex: { if exponent_str.starts_with('e') && exponent_str[1..].starts_with(|ch: char| ch == '+' || ch == '-' || ch.is_numeric()) {
+        let (exponent, exp_len) = 'exp_lex: { if exponent_str.starts_with('e') && exponent_str[1..].starts_with(|ch: char| ch == '+' || ch == '-' || ch.is_ascii_digit()) {
             cur_offset += 1;
             let tmp = self.offset_from_cur_line(cur_offset);
 
@@ -665,14 +686,14 @@ impl Lexer {
     fn read_numeric_offset<'a>(&'a self, offset: usize) -> &'a str {
         let offset = offset.min(self.line_buf.len() - self.line_offset);
         let offset_line = &self.line_buf[self.line_offset + offset..];
-        let len = offset_line.find(|ch: char| !(ch.is_numeric() || ch == '_')).unwrap_or(offset_line.len());
+        let len = offset_line.find(|ch: char| !(ch.is_ascii_digit() || ch == '_')).unwrap_or(offset_line.len());
         &self.line_buf[self.line_offset + offset..][..len]
     }
 
     fn read_numeric_hex_offset<'a>(&'a self, offset: usize) -> &'a str {
         let offset = offset.min(self.line_buf.len() - self.line_offset);
         let offset_line = &self.line_buf[self.line_offset + offset..];
-        let len = offset_line.find(|ch: char| !(ch.is_numeric() || ('a'..='f').contains(&ch) || ('A'..='F').contains(&ch) || ch == '_')).unwrap_or(offset_line.len());
+        let len = offset_line.find(|ch: char| !(ch.is_ascii_hexdigit() || ch == '_')).unwrap_or(offset_line.len());
         &self.line_buf[self.line_offset + offset..][..len]
     }
 
