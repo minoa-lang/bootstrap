@@ -1,9 +1,6 @@
 use std::io;
 
-pub enum LexError {
-    FileIO(io::Error),
-}
-
+use crate::{lex::LexError, log};
 
 pub struct ErrorWarnState {
     pub lex_errors: Vec<LexError>,
@@ -23,6 +20,10 @@ impl ErrorWarnState {
 
     // TODO: once we have more than just lex error, group per file and from top to bottom of file
     pub fn log(&self) -> io::Result<()> {
+        for err in &self.lex_errors {
+            log!(Error, "{err}")?;
+        }
+
         Ok(())
     }
 }

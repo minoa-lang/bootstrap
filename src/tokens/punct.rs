@@ -7,7 +7,6 @@ pub enum Delimiter {
     Brace,
     Bracket,
     Vector,
-    ParenColon,
 }
 
 impl Delimiter {
@@ -17,7 +16,6 @@ impl Delimiter {
             Self::Brace       => "{",
             Self::Bracket     => "[",
             Self::Vector      => "[<",
-            Self::ParenColon  => "(:",
         }
     }
 
@@ -27,7 +25,6 @@ impl Delimiter {
             Self::Brace       => "}",
             Self::Bracket     => "]",
             Self::Vector      => ">]",
-            Self::ParenColon  => ":)"
         }
     }
 }

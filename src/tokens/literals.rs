@@ -52,12 +52,25 @@ pub enum EscapeSequence {
     Quote,
     #[fmt("\\\\")]
     Backslash,
-    #[fmt("\\r\\n or \\n")]
+    #[fmt("\\p")]
     SystemNewline,
-    #[fmt("\\x{_0:X}")]
-    Hex(u8),
-    #[fmt("\\u{{{_0:X}}}")]
-    Unicode(u32),
+    #[fmt("\\x{_0}")]
+    Hex(String),
+    #[fmt("\\u{{{_0}}}")]
+    Unicode(String),
+    #[fmt("{_0}")]
+    Unsupported(String),
+}
+
+impl EscapeSequence {
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Hex(_) => 4, // \xHH
+            Self::Unicode(code) => code.len() + 4, // '\u{' + '}'
+            Self::Unsupported(s) => s.len(),
+            _ => 2,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
@@ -146,14 +159,14 @@ pub enum LiteralSegment {
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[enum_utils(display)]
 pub enum LiteralError {
+    #[fmt("The {_0} literal does not contain a value")]
+    EmptyLiteral(LiteralSegment),
     #[fmt("The {_0} literal may not have a leading underscore (`_`)")]
     LeadingUnderscore(LiteralSegment),
     #[fmt("The {_0} literal may not have a trailing underscore (`_`)")]
     TrailingUnderscore(LiteralSegment),
     #[fmt("Unexpected digit '{_1}' found in the {_0} literal")]
     UnsupportedDigit(LiteralSegment, char),
-    #[fmt("A hexadecimal floats must contain an exponent")]
-    HexFloatNoExp,
     #[fmt("Invalid character literal: {_0}")]
     InvalidCharacterLiteral(String),
     #[fmt("Unexpected escape sequence '{_0}' found")]

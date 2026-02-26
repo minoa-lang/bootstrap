@@ -19,8 +19,7 @@ use util::log;
 use crate::{
     args::Arguments,
     context::Context,
-    err_warn::LexError,
-    lex::Lexer,
+    lex::{LexError, Lexer},
     tokens::TokenStream,
     util::{log::{get_logger, init_global_logger}, time::Timer}
 };
@@ -76,7 +75,7 @@ pub fn lex(path: &str, ctx: &Context) -> Result<TokenStream, ()> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(err) => {
-            ctx.err_warn.lock().add_lexer_error(LexError::FileIO(err));
+            ctx.err_warn.lock().add_lexer_error(LexError::IO(err));
             return Err(())
         },
     };
