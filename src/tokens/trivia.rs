@@ -1,5 +1,4 @@
-use std::fmt;
-
+use bootstrap_macros::enum_utils;
 
 pub fn is_whitespace_trivia(ch: char) -> bool {
     matches!(ch,
@@ -20,20 +19,18 @@ pub fn is_whitespace_trivia(ch: char) -> bool {
 }
 
 #[derive(Clone, Debug)]
+#[enum_utils(display)]
 pub enum TriviaElem {
+    #[fmt("{_0}")]
     Whitespace(String),
+    #[fmt("// {_0}")]
     Comment(String),
+    #[fmt("/// {_0}")]
     DocComment(String),
-}
-
-impl fmt::Display for TriviaElem {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TriviaElem::Whitespace(s) => write!(f, "{s}"),
-            TriviaElem::Comment(s)    => write!(f, "{s}"),
-            TriviaElem::DocComment(s) => write!(f, "{s}"),
-        }
-    }
+    #[fmt("//! {_0}")]
+    TopLevelDocComment(String),
+    #[fmt("//< {_0}")]
+    SuffixDocComment(String),
 }
 
 #[derive(Clone, Debug, Default)]

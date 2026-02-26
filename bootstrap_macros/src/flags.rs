@@ -50,7 +50,7 @@ pub fn flags(_attr: proc_macro::TokenStream, ast: DeriveInput) -> TokenStream {
 
     let (zero_variant, zero_name) = match zero_name {
         Some(variant) => (quote! {}, variant),
-        None => (quote! { #[allow(non_upper_case_globals)] const None: #ident = #ident{ bits: 0 }; }, "None".to_string()),
+        None => (quote! { #[allow(non_upper_case_globals)] pub const None: #ident = #ident{ bits: 0 }; }, "None".to_string()),
     };
 
     let vis = &ast.vis;
@@ -92,7 +92,7 @@ pub fn flags(_attr: proc_macro::TokenStream, ast: DeriveInput) -> TokenStream {
         impl #ident {
             #zero_variant
 
-            #(#[allow(non_upper_case_globals)] const #variants: #ident = #ident { bits: #variant_vals as #ty };)*
+            #(#[allow(non_upper_case_globals)] pub const #variants: #ident = #ident { bits: #variant_vals as #ty };)*
 
             pub const fn new(bits: #ty) -> Self {
                 Self { bits }

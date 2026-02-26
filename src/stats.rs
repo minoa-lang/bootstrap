@@ -55,7 +55,7 @@ impl LexStats {
 
 #[flags]
 pub enum CompilerStatFlags {
-    Minimal = 0,
+    Enabled,
     PerFileLex,
 
     PerFile = PerFileLex,
@@ -77,7 +77,11 @@ impl CompilerStats {
     }
 
     pub fn log(&self, flags: CompilerStatFlags) {
+        if !flags.contains(CompilerStatFlags::Enabled) {
+            return;
+        }
         
+        log!(Info, "==============");
         log!(Info, "Compiler Stats");
         log!(Info, "==============");
 

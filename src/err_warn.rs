@@ -19,4 +19,10 @@ impl ErrorWarnState {
     pub fn add_lexer_error(&mut self, err: LexError) {
         self.lex_errors.push(err);
     }
+
+
+    // TODO: once we have more than just lex error, group per file and from top to bottom of file
+    pub fn log(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
