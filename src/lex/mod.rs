@@ -324,7 +324,7 @@ impl Lexer {
 
         let mut cur_offset = integral.len();
         let fraction_str = self.offset_from_cur_line(cur_offset);
-        let fraction = if fraction_str.starts_with('.') && fraction_str[1..].starts_with(char::is_ascii_digit) {
+        let fraction = if fraction_str.starts_with('.') && fraction_str[1..].starts_with(|ch: char| ch.is_ascii_digit()) {
             cur_offset += 1;
             let frac = self.read_numeric_offset(cur_offset).to_string();
             self.check_for_literal_error(cur_offset, &frac, LiteralSegment::DecFraction);
