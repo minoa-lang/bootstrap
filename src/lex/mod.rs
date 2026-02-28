@@ -105,6 +105,9 @@ impl Lexer {
                     '\'' => self.lex_char(),
                     '/'  => self.lex_comment_or_punctuation(),
                     '_'  => self.let_name_or_underscore(),
+                    '"'  => self.lex_string(),
+                    '`'  => self.lex_raw_string(),
+                    '#'  => self.lex_raw_string_or_punct(),
                     '.'  => self.lex_dot(),
                     _    => self.lex_punctuation(),
                 }
@@ -531,6 +534,97 @@ impl Lexer {
         
         let meta = self.consume_and_get_meta(len + 2);  // + 2 for outer `'`s
         self.add_token(tok, meta);
+    }
+
+    // TODO: String escape sequences validation
+
+    // Does not handle interpolated strings yet
+    fn lex_string(&mut self) {
+        let mut prev_char_is_escape = false;
+        let mut is_end = false;
+
+        let inner = &self.offset_from_cur_line(1);
+        let end = inner.find(|ch: char| match ch {
+            '\\' => {
+                prev_char_is_escape = true;
+                false
+            },
+            '"' => if prev_char_is_escape {
+                prev_char_is_escape = false;
+                false
+            } else {
+                is_end = true;
+                true
+            }
+            _ => false,
+        }).unwrap_or(inner.len() - (self.line_buf.ends_with("\r\n") as usize) - 1);
+
+        let inner = &inner[..end];
+        let token = if is_end {
+            Token::Literal(Literal::String(inner.to_string()))
+        } else {
+            Token::Literal(Literal::MultiStringSegment(inner.to_string()))
+        };
+        let meta = self.consume_and_get_meta(inner.len() + (is_end as usize) + 1);
+        self.add_token(token, meta);
+    }
+
+    /// Lexes raw strings starting with '`'
+    fn lex_raw_string(&mut self) {
+        let inner = &self.offset_from_cur_line(1);
+        let (inner, token, is_end) = match self.offset_from_cur_line(1).find('`') {
+            Some(end) => {
+                let inner = &inner[..end];
+                let token = Token::Literal(Literal::RawString(0, inner.to_string()));
+                (inner, token, true)
+            }
+            None => {
+                let is_win_ending = inner.ends_with("\r\n");
+                let end = inner.len() - (is_win_ending as usize) - 1;
+                let inner = &inner[..end];
+                let token = Token::Literal(Literal::MultiRawStringSegment(0, inner.to_string()));
+                (inner, token, false)
+            },
+        };
+
+        let meta = self.consume_and_get_meta(inner.len() + (is_end as usize) + 1);
+        self.add_token(token, meta);
+    }
+
+    /// Lexer raw string starting with '#'
+    fn lex_raw_string_or_punct(&mut self) {
+        let inner = self.cur_line();
+        let depth = inner.find(|ch: char| ch != '#').unwrap_or(inner.len());
+        let is_raw_str = inner[depth..].starts_with('`');
+
+        if !is_raw_str {
+            self.lex_punctuation();
+            return;
+        }
+
+        let inner = &inner[depth + 1..];
+        let mut ending = String::with_capacity(depth + 1);
+        ending.push('`');
+        for _ in 0..depth {
+            ending.push('#');
+        }
+
+        let (inner, token, is_end) = match inner.find(&ending) {
+            Some(end) => {
+                let inner = &inner[..end];
+                let token = Token::Literal(Literal::RawString(depth, inner.to_string()));
+                (inner, token, true)
+            },
+            None => {
+                let is_win_ending = inner.ends_with("\r\n");
+                let end = inner.len() - (is_win_ending as usize) - 1;
+                let inner = &inner[..end];
+                let token = Token::Literal(Literal::MultiRawStringSegment(depth, inner.to_string()));
+                (inner, token, false)
+            },
+        };
+        let meta = self.consume_and_get_meta(inner.len() + ((is_end as usize) + 1) * ending.len());
+        self.add_token(token, meta);
     }
 
     

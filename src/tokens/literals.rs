@@ -81,6 +81,20 @@ pub enum CharLiteral {
     #[fmt("{_0}")]
     Escape(EscapeSequence),
 }
+
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+#[enum_utils(display)]
+pub enum StringLiteral {
+    #[fmt("\"{_0}\"")]
+    String(String),
+    #[fmt("\"{_0}")]
+    MultiStringSegment(String),
+    // TODO: is {:#_0$} correct?
+    #[fmt("{0:#_0$}`{_1}`{0:#_0$}", "")]
+    Raw(usize, String),
+    #[fmt("{0:#_0$}`{_1}", "")]
+    MultiRawSegment(usize, String),
+}
  
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 #[enum_utils(as_str(snake_case))]
@@ -104,6 +118,9 @@ pub enum Literal {
     },
     Char(CharLiteral),
     String(String),
+    MultiStringSegment(String),
+    RawString(usize, String),
+    MultiRawStringSegment(usize, String),
 }
 
 impl fmt::Display for Literal {
@@ -130,7 +147,10 @@ impl fmt::Display for Literal {
                 Ok(())
             },
             Literal::Char(ch) => write!(f, "{ch}"),
-            Literal::String(s) => f.write_str(s)
+            Literal::String(s) => f.write_str(s),
+            Literal::MultiStringSegment(s) => f.write_str(s),
+            Literal::RawString(_, s) => f.write_str(s),
+            Literal::MultiRawStringSegment(_, s) => f.write_str(s),
         }
     }
 }
