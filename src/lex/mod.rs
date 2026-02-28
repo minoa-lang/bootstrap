@@ -93,13 +93,10 @@ impl Lexer {
     }
 
     pub fn lex(&mut self) -> Result<TokenStream, Vec<(Span, LexError)>> {
-        let mut line = String::new();
-
         while self.read_line()? {
-            let mut idx = 0;
             while let Some(ch) = self.peek_char() {
                 match ch {
-                    _ if is_whitespace_trivia(ch) => self.lex_whitespace(&line, idx),
+                    _ if is_whitespace_trivia(ch) => self.lex_whitespace(),
                     _ if ch.is_alphabetic() => self.lex_kw_or_name(),
                     _ if ch.is_ascii_digit() => self.lex_numeric_literal(),
                     '\'' => self.lex_char(),
@@ -253,7 +250,7 @@ impl Lexer {
         }
     }
 
-    fn lex_whitespace(&mut self, line: &str, idx: usize) {
+    fn lex_whitespace(&mut self) {
         let line = &self.line_buf[self.line_offset..];
         let whitespace = self.read(is_whitespace_trivia).to_string();
         let whitespace_len = whitespace.len();
@@ -556,7 +553,10 @@ impl Lexer {
                 is_end = true;
                 true
             }
-            _ => false,
+            _ => {
+                prev_char_is_escape = false;
+                false
+            },
         }).unwrap_or(inner.len() - (self.line_buf.ends_with("\r\n") as usize) - 1);
 
         let inner = &inner[..end];
