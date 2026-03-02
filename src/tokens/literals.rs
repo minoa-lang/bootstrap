@@ -54,6 +54,10 @@ pub enum EscapeSequence {
     Backslash,
     #[fmt("\\p")]
     SystemNewline,
+    #[fmt("\\}}")]
+    ClosingBrace,
+    #[fmt("\\,")]
+    Comma,
     #[fmt("\\x{_0}")]
     Hex(String),
     #[fmt("\\u{{{_0}}}")]
@@ -90,9 +94,9 @@ pub enum StringLiteral {
     #[fmt("\"{_0}")]
     MultiStringSegment(String),
     // TODO: is {:#_0$} correct?
-    #[fmt("{0:#_0$}`{_1}`{0:#_0$}", "")]
+    #[fmt("{0}`{_1}`{0:#_0$}", "#".repeat(*_0))]
     Raw(usize, String),
-    #[fmt("{0:#_0$}`{_1}", "")]
+    #[fmt("{}`{_1}", "#".repeat(*_0))]
     MultiRawSegment(usize, String),
 }
  
@@ -118,9 +122,33 @@ pub enum Literal {
     },
     Char(CharLiteral),
     String(String),
-    MultiStringSegment(String),
-    RawString(usize, String),
-    MultiRawStringSegment(usize, String),
+    MultiStringSegment{
+        content: String,
+        newline: bool,
+    },
+    RawString{
+        // Only should hold up to 255, but we want to lex invalid strings to print them correctly
+        depth:   usize,
+        content: String
+    },
+    MultiRawStringSegment{
+        // Only should hold up to 255, but we want to lex invalid strings to print them correctly
+        depth:   usize,
+        content: String,
+        newline: bool,
+    },
+
+    InterpString {
+        includes_end: bool,
+        includes_start: bool,
+        content: String,
+    },
+    MultiInterpString{
+        includes_end: bool,
+        includes_start: bool,
+        content: String,
+        newline: bool,
+    },
 }
 
 impl fmt::Display for Literal {
@@ -147,10 +175,22 @@ impl fmt::Display for Literal {
                 Ok(())
             },
             Literal::Char(ch) => write!(f, "{ch}"),
-            Literal::String(s) => f.write_str(s),
-            Literal::MultiStringSegment(s) => f.write_str(s),
-            Literal::RawString(_, s) => f.write_str(s),
-            Literal::MultiRawStringSegment(_, s) => f.write_str(s),
+            Literal::String(s) => write!(f, "\"{s}\""),
+            Literal::MultiStringSegment{ content, .. } => write!(f, "\"{content}"),
+            Literal::RawString{ depth, content, .. } => write!(f, "{0}`{content}`{0}", "#".repeat(*depth)),
+            Literal::MultiRawStringSegment{ content, .. } => write!(f, "`{content}"),
+            Literal::InterpString{ includes_end, includes_start, content: s } => {
+                write!(f, "{}{s}{}",
+                    if *includes_end { "}" } else { "\"" },
+                    if *includes_start { "\\{" } else { "\"" },
+                )
+            },
+            Literal::MultiInterpString{ includes_end, includes_start, content, .. } => {
+                write!(f, "\"{}{content}{}",
+                    if *includes_end { "}" } else { "" },
+                    if *includes_start { "\\{" } else { "" },
+                )
+            },
         }
     }
 }

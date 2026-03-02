@@ -27,7 +27,13 @@ pub enum LexError {
     #[fmt("Missing space after comment start")]
     MissingSpaceInComment,
     #[fmt("Suffix doc comment may not appear before any token has been parsed")]
-    SuffixDocCommentBeforeToken
+    SuffixDocCommentBeforeToken,
+    #[fmt("String literal was not closed")]
+    StringNoEnd,
+    #[fmt("A raw string can be prefixed with at most 255 #'s")]
+    RawStringTooDeep,
+    #[fmt("Raw string literal was not closed")]
+    RawStringNoEnd,
 }
 
 pub struct Lexer {
@@ -47,6 +53,10 @@ pub struct Lexer {
     line_buf:       String,
     line_offset:    usize,
     line_has_token: bool,
+
+    in_multi_str:   bool,
+    interp_stack:   Vec<u32>,
+    raw_str_end:    String,
 
     errors:         Vec<(Span, LexError)>,
 }
@@ -88,12 +98,16 @@ impl Lexer {
             line_buf: String::with_capacity(Self::LINE_BUF_MIN_SIZE),
             line_offset: 0,
             line_has_token: false,
+            in_multi_str: false,
+            interp_stack: Vec::new(),
+            raw_str_end: String::with_capacity(256),
             errors: Vec::new(),
         }
     }
 
     pub fn lex(&mut self) -> Result<TokenStream, Vec<(Span, LexError)>> {
         while self.read_line()? {
+            self.string_ended_check();
             while let Some(ch) = self.peek_char() {
                 match ch {
                     _ if is_whitespace_trivia(ch) => self.lex_whitespace(),
@@ -106,10 +120,16 @@ impl Lexer {
                     '`'  => self.lex_raw_string(),
                     '#'  => self.lex_raw_string_or_punct(),
                     '.'  => self.lex_dot(),
+                    '}'  => if self.interp_indent_depth() == Some(0) {
+                        self.lex_string();
+                    } else {
+                        self.lex_punctuation();
+                    }
                     _    => self.lex_punctuation(),
                 }
             }
         }
+        self.string_ended_check();
 
         if !self.errors.is_empty() {
             Err(mem::take(&mut self.errors))
@@ -202,8 +222,14 @@ impl Lexer {
                 }
             }
             ']' => (Token::CloseDelim(Delimiter::Bracket), 1),
-            '{' => (Token::OpenDelim(Delimiter::Brace), 1),
-            '}' => (Token::CloseDelim(Delimiter::Brace), 1),
+            '{' => {
+                self.increment_interp_indent();
+                (Token::OpenDelim(Delimiter::Brace), 1)
+            },
+            '}' => {
+                self.decrement_interp_indent();
+                (Token::CloseDelim(Delimiter::Brace), 1)
+            },
             '>' => if punct.starts_with(">]") {
                 (Token::CloseDelim(Delimiter::Vector), 2)
             } else {
@@ -520,12 +546,10 @@ impl Lexer {
             Some(offset) => if offset != 0 {
                 self.add_char_lit_error(LexError::Literal(LiteralError::InvalidCharacterLiteral("Literal was not closed with a `'`".to_string())));
                 self.consume_line();
-                return;
             },
             None => {
                 self.add_char_lit_error(LexError::UnexpectedEOL);
                 self.consume_line();
-                return;
             },
         }
         
@@ -539,9 +563,13 @@ impl Lexer {
     fn lex_string(&mut self) {
         let mut prev_char_is_escape = false;
         let mut is_end = false;
+        let mut is_interp = false;
+
+        let is_continuation = self.cur_line().starts_with('}');
 
         let inner = &self.offset_from_cur_line(1);
-        let end = inner.find(|ch: char| match ch {
+        let end = inner.find(|ch: char|
+            match ch {
             '\\' => {
                 prev_char_is_escape = true;
                 false
@@ -553,41 +581,90 @@ impl Lexer {
                 is_end = true;
                 true
             }
+            '{' if prev_char_is_escape => {
+                is_interp = true;
+                true
+            },
             _ => {
                 prev_char_is_escape = false;
                 false
             },
-        }).unwrap_or(inner.len() - (self.line_buf.ends_with("\r\n") as usize) - 1);
+        }).unwrap_or(inner.len() - self.eol_size());
 
-        let inner = &inner[..end];
-        let token = if is_end {
-            Token::Literal(Literal::String(inner.to_string()))
+        let inner = &inner[..end - (is_interp as usize)];
+        let token = if is_interp {
+            Token::Literal(Literal::InterpString{ 
+                includes_start: true,
+                includes_end: is_continuation,
+                content: inner.to_string(),
+            })
+        } else if is_end {
+            if is_continuation {
+                Token::Literal(Literal::InterpString {
+                    includes_end: is_continuation,
+                    includes_start: false,
+                    content: inner.to_string(),
+                })
+            } else {
+                Token::Literal(Literal::String(inner.to_string()))
+            }
         } else {
-            Token::Literal(Literal::MultiStringSegment(inner.to_string()))
+            let newline = !inner.ends_with('\\');
+            let inner = &inner[..inner.len() - (!newline as usize)];
+            if is_continuation {
+                Token::Literal(Literal::MultiInterpString{
+                    includes_end: is_continuation,
+                    includes_start: false,
+                    content: inner.to_string(),
+                    newline
+                })
+            } else {
+                Token::Literal(Literal::MultiStringSegment{ content: inner.to_string(), newline })
+            }
         };
-        let meta = self.consume_and_get_meta(inner.len() + (is_end as usize) + 1);
+
+
+        let meta = self.consume_and_get_meta(inner.len() + (is_end as usize) + (is_interp as usize) * 2 + 1);
         self.add_token(token, meta);
+
+        if is_interp {
+            self.push_interp_indent();
+        }
+        self.in_multi_str = !is_end;
     }
 
     /// Lexes raw strings starting with '`'
     fn lex_raw_string(&mut self) {
         let inner = &self.offset_from_cur_line(1);
-        let (inner, token, is_end) = match self.offset_from_cur_line(1).find('`') {
+
+        let end = if !self.raw_str_end.is_empty() {
+            &self.raw_str_end
+        } else {
+            "`"
+        };
+
+        let (inner, token, is_end) = match self.offset_from_cur_line(1).find(end) {
             Some(end) => {
                 let inner = &inner[..end];
-                let token = Token::Literal(Literal::RawString(0, inner.to_string()));
+                let token = Token::Literal(Literal::RawString{ depth: 0, content: inner.to_string() });
                 (inner, token, true)
             }
             None => {
-                let is_win_ending = inner.ends_with("\r\n");
-                let end = inner.len() - (is_win_ending as usize) - 1;
-                let inner = &inner[..end];
-                let token = Token::Literal(Literal::MultiRawStringSegment(0, inner.to_string()));
+                let end = inner.len() - self.eol_size();
+                let newline = !inner[..end].ends_with('\\');
+                let inner = &inner[..end - (!newline as usize)];
+                let token = Token::Literal(Literal::MultiRawStringSegment{ depth: 0, content: inner.to_string(), newline });
                 (inner, token, false)
             },
         };
 
-        let meta = self.consume_and_get_meta(inner.len() + (is_end as usize) + 1);
+        let token_len = inner.len() + (is_end as usize) + 1;
+        if is_end {
+            self.raw_str_end.clear();
+        } else if self.raw_str_end.is_empty() {
+            self.raw_str_end.push('`');
+        }
+        let meta = self.consume_and_get_meta(token_len);
         self.add_token(token, meta);
     }
 
@@ -595,35 +672,45 @@ impl Lexer {
     fn lex_raw_string_or_punct(&mut self) {
         let inner = self.cur_line();
         let depth = inner.find(|ch: char| ch != '#').unwrap_or(inner.len());
-        let is_raw_str = inner[depth..].starts_with('`');
 
+        let invalid_depth = depth > 255;
+        let is_raw_str = inner[depth..].starts_with('`');
+        
         if !is_raw_str {
             self.lex_punctuation();
             return;
         }
-
-        let inner = &inner[depth + 1..];
-        let mut ending = String::with_capacity(depth + 1);
-        ending.push('`');
+        
+        self.raw_str_end.push('`');
         for _ in 0..depth {
-            ending.push('#');
+            self.raw_str_end.push('#');
         }
-
-        let (inner, token, is_end) = match inner.find(&ending) {
+        let inner = self.offset_from_cur_line(depth + 1);
+        
+        let (inner, token, is_end) = match inner.find(&self.raw_str_end) {
             Some(end) => {
                 let inner = &inner[..end];
-                let token = Token::Literal(Literal::RawString(depth, inner.to_string()));
+                let token = Token::Literal(Literal::RawString{ depth, content: inner.to_string() });
                 (inner, token, true)
             },
             None => {
-                let is_win_ending = inner.ends_with("\r\n");
-                let end = inner.len() - (is_win_ending as usize) - 1;
-                let inner = &inner[..end];
-                let token = Token::Literal(Literal::MultiRawStringSegment(depth, inner.to_string()));
+                let end = inner.len() - self.eol_size();
+                let newline = !inner[..end].ends_with('\\');
+                let inner = &inner[..end - (!newline as usize)];
+                let token = Token::Literal(Literal::MultiRawStringSegment{ depth, content: inner.to_string(), newline });
                 (inner, token, false)
             },
         };
-        let meta = self.consume_and_get_meta(inner.len() + ((is_end as usize) + 1) * ending.len());
+
+        let token_len = inner.len() + ((is_end as usize) + 1) * self.raw_str_end.len();
+        if depth > 255 {
+            self.add_error(Some(token_len), LexError::RawStringTooDeep);
+        }
+        if is_end {
+            self.raw_str_end.clear();
+        }
+        
+        let meta = self.consume_and_get_meta(token_len);
         self.add_token(token, meta);
     }
 
@@ -653,17 +740,19 @@ impl Lexer {
             '\'' => EscapeSequence::Quote,
             '\\' => EscapeSequence::Backslash,
             'p'  => EscapeSequence::SystemNewline,
+            '}'  => EscapeSequence::ClosingBrace,
+            ','  => EscapeSequence::Comma,
             'x'  => {
                     let sequence = &sequence[1..];
                     let end = sequence.find(|ch: char| !ch.is_ascii_hexdigit()).unwrap_or(sequence.len());
-                    let code = &sequence[..end];
-
-                    if code.len() != 2 {
+                    
+                    if end != 2 {
+                        // + 2 for leading '\x'
                         let sequence = self.offset_from_cur_line(offset)[..end + 2].to_string();
-                        self.add_char_lit_error(LexError::Literal(LiteralError::InvalidUnicodeEscape(format!("Expected exactly 2 hex characters after 'x', found {}", code.len()))));
+                        self.add_char_lit_error(LexError::Literal(LiteralError::InvalidUnicodeEscape(format!("Expected exactly 2 hex characters after 'x', found {end}"))));
                         EscapeSequence::Unsupported(sequence)
                     } else {
-                        // + 2 for leading '\x'
+                        let code = &sequence[..end];
                         EscapeSequence::Hex(code.to_string())
                     }
                 },
@@ -718,6 +807,27 @@ impl Lexer {
             }
         }
     }
+
+    fn string_ended_check(&mut self) {
+        let (string_start, raw_string_start) = match self.cur_line().find(|ch: char| !is_whitespace_trivia(ch)) {
+            Some(offset) => {
+                let post_whitespace = &self.offset_from_cur_line(offset);
+                let string_start = post_whitespace.starts_with('"');
+                let raw_string_start = post_whitespace.starts_with('`');
+                (string_start, raw_string_start)
+            }
+            None => (false, false),
+        };
+        
+        if !string_start && self.in_multi_str {
+            self.add_error(None, LexError::StringNoEnd);
+            self.in_multi_str = false;
+        }
+        if !raw_string_start && !self.raw_str_end.is_empty() {
+            self.add_error(None, LexError::RawStringNoEnd);
+            self.raw_str_end.clear();
+        }
+    }
 }
 
 // Utilities
@@ -757,6 +867,20 @@ impl Lexer {
         let line = &self.line_buf[self.line_offset..];
         line.chars().next()
     }
+
+    fn eol_size(&self) -> usize {
+        let bytes = self.line_buf.as_bytes();
+        let len = self.line_buf.len();
+        match len {
+            0 => 0,
+            1 => (bytes[0] == b'\n') as usize,
+            _ => if bytes[len - 1] == b'\n' {
+                1 + ((bytes[len - 2] == b'\r') as usize)
+            } else {
+                0
+            }
+        }
+    }
  
     fn read<'a, P: FnMut(char) -> bool>(&'a self, mut pat: P) -> &'a str {
         let line = &self.line_buf[self.line_offset..];
@@ -778,17 +902,11 @@ impl Lexer {
     }
 
     fn read_numeric_offset<'a>(&'a self, offset: usize) -> &'a str {
-        let offset = offset.min(self.line_buf.len() - self.line_offset);
-        let offset_line = &self.line_buf[self.line_offset + offset..];
-        let len = offset_line.find(|ch: char| !(ch.is_ascii_digit() || ch == '_')).unwrap_or(offset_line.len());
-        &self.line_buf[self.line_offset + offset..][..len]
+        self.read_at_offset(offset, |ch: char| ch.is_ascii_digit() || ch == '_')
     }
 
     fn read_numeric_hex_offset<'a>(&'a self, offset: usize) -> &'a str {
-        let offset = offset.min(self.line_buf.len() - self.line_offset);
-        let offset_line = &self.line_buf[self.line_offset + offset..];
-        let len = offset_line.find(|ch: char| !(ch.is_ascii_hexdigit() || ch == '_')).unwrap_or(offset_line.len());
-        &self.line_buf[self.line_offset + offset..][..len]
+        self.read_at_offset(offset, |ch: char| ch.is_ascii_hexdigit() || ch == '_')
     }
 
     fn consume(&mut self, num_bytes: usize) -> usize {
@@ -909,5 +1027,29 @@ impl Lexer {
         }).map_or(line.len(), |len| len - 1);
         
         self.add_error(Some(end), err);
+    }
+
+    fn increment_interp_indent(&mut self) {
+        if let Some(top) = self.interp_stack.last_mut() {
+            *top += 1;
+        }
+    }
+
+    fn decrement_interp_indent(&mut self) {
+        if let Some(top) = self.interp_stack.last_mut() {
+            *top -= 1;
+        }
+    }
+
+    fn push_interp_indent(&mut self) {
+        self.interp_stack.push(0);
+    }
+
+    fn pop_interp_indent(&mut self) {
+        self.interp_stack.pop();
+    }
+
+    fn interp_indent_depth(&self) -> Option<u32> {
+        self.interp_stack.last().cloned()
     }
 }
