@@ -172,13 +172,13 @@ impl Logger {
         lock.log(if self.use_ansi_colors { "\x1B[39;49m\n" } else { "\n" })
     }
 
-    pub fn logln_undecorated(&mut self, text: &str) -> io::Result<()> {
+    pub fn logln_undecorated(&self, text: &str) -> io::Result<()> {
         let mut lock = self.lock(false);
         lock.log(text)?;
         lock.log("\n")
     }
 
-    pub fn log_undecorated(&mut self, text: &str) -> io::Result<()> {
+    pub fn log_undecorated(&self, text: &str) -> io::Result<()> {
         self.lock(false).log(text)
     }
 

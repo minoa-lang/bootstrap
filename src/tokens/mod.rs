@@ -16,6 +16,9 @@ pub use span::*;
 mod literals;
 pub use literals::*;
 
+mod tree;
+pub use tree::*;
+
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 #[enum_utils(as_str(snake_case), display)]
@@ -47,8 +50,9 @@ pub struct TokenMeta {
 
 
 pub struct TokenStream {
-    tokens: Vec<Token>,
-    metadata: Vec<TokenMeta>
+    tokens:   Vec<Token>,
+    metadata: Vec<TokenMeta>,
+    tree:     TokenTreeData,
 }
 
 impl TokenStream {
@@ -56,6 +60,7 @@ impl TokenStream {
         TokenStream {
             tokens: Vec::new(),
             metadata: Vec::new(),
+            tree: TokenTreeData::default(),
         }
     }
 
@@ -97,6 +102,13 @@ impl TokenStream {
         self.tokens.len()
     }
 
+    pub fn tree<'a>(&'a self) -> TokenTree<'a> {
+        TokenTree {
+            stream: self,
+            tree_data: &self.tree,
+            depth: 0,
+        }
+    }
 
     pub fn no_trivia_formatter<'a>(&'a self) -> NoTriviaTokenStreamFormatter<'a> {
         NoTriviaTokenStreamFormatter { tokens: self }
@@ -104,6 +116,10 @@ impl TokenStream {
 
     pub fn csv_formatter<'a>(&'a self) -> CsvTokenStreamFormatter<'a> {
         CsvTokenStreamFormatter { tokens: self }
+    }
+
+    pub fn set_tree_data(&mut self, tree: TokenTreeData) {
+        self.tree = tree;
     }
 }
 

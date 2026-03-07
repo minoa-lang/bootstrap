@@ -10,6 +10,10 @@ pub struct Arguments {
     #[arg(long)]
     pub output_token_csv: bool,
 
+    // Logs the resulting token tree
+    #[arg(long)]
+    pub log_token_tree: bool,
+
     /// Enable collection of compiler statistics
     #[arg(long)]
     pub stats: bool,

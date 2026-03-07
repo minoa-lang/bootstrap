@@ -6,6 +6,7 @@ use std::{
 
 pub mod log;
 pub mod time;
+pub mod format;
 
 
 #[derive(Clone, Copy, Debug)]

@@ -93,8 +93,7 @@ pub enum StringLiteral {
     String(String),
     #[fmt("\"{_0}")]
     MultiStringSegment(String),
-    // TODO: is {:#_0$} correct?
-    #[fmt("{0}`{_1}`{0:#_0$}", "#".repeat(*_0))]
+    #[fmt("{0}`{_1}`{0}", "#".repeat(*_0))]
     Raw(usize, String),
     #[fmt("{}`{_1}", "#".repeat(*_0))]
     MultiRawSegment(usize, String),
@@ -149,6 +148,7 @@ pub enum Literal {
         content: String,
         newline: bool,
     },
+    InterpIndicator,
 }
 
 impl fmt::Display for Literal {
@@ -191,6 +191,7 @@ impl fmt::Display for Literal {
                     if *includes_start { "\\{" } else { "" },
                 )
             },
+            Literal::InterpIndicator => write!(f, "\""),
         }
     }
 }

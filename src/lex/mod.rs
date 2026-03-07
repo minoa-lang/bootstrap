@@ -12,7 +12,7 @@ use std::{
 
 use bootstrap_macros::enum_utils;
 
-use crate::tokens::{is_whitespace_trivia, CharLiteral, Delimiter, EscapeSequence, Exponent, HexExponent, Literal, LiteralError, LiteralSegment, Punctuation, ReservedKeyword, Span, StrongKeyword, Token, TokenMeta, TokenStream, Trivia, TriviaElem, WeakKeyword};
+use crate::{tokens::{is_whitespace_trivia, CharLiteral, Delimiter, EscapeSequence, Exponent, HexExponent, Literal, LiteralError, LiteralSegment, Punctuation, ReservedKeyword, Span, StrongKeyword, Token, TokenMeta, TokenStream, TokenTreeBuildError, TokenTreeBuilder, Trivia, TriviaElem, WeakKeyword}};
 
 #[enum_utils(display)]
 pub enum LexError {
@@ -34,6 +34,17 @@ pub enum LexError {
     RawStringTooDeep,
     #[fmt("Raw string literal was not closed")]
     RawStringNoEnd,
+    #[fmt("Trying to close a sub-token tree when none is available")]
+    EndOfRootTree,
+    #[fmt("Missing matching closing delimiters: {_0}")]
+    MissingDelimiter(String),
+    #[fmt("No matching open delimiter for '{_0}'")]
+    NoOpenDelimiter(&'static str),
+    #[fmt("Closing unmatched delimiter, expected '{expected}', found {found}")]
+    UnmatchedDelimiter{
+        expected: &'static str,
+        found: &'static str,
+    },
 }
 
 pub struct Lexer {
@@ -49,6 +60,7 @@ pub struct Lexer {
 
     trivia:         Trivia,
     toks:           TokenStream,
+    tok_tree:       TokenTreeBuilder,
 
     line_buf:       String,
     line_offset:    usize,
@@ -95,6 +107,7 @@ impl Lexer {
             punct_map,
             trivia: Trivia::new(),
             toks: TokenStream::new(),
+            tok_tree: TokenTreeBuilder::new(),
             line_buf: String::with_capacity(Self::LINE_BUF_MIN_SIZE),
             line_offset: 0,
             line_has_token: false,
@@ -129,12 +142,24 @@ impl Lexer {
                 }
             }
         }
+        let end_idx = if self.toks.is_empty() { 0 } else { (self.toks.len() - 1) as u32 };
         self.string_ended_check();
 
         if !self.errors.is_empty() {
             Err(mem::take(&mut self.errors))
         } else {
-            Ok(mem::replace(&mut self.toks, TokenStream::new()))
+            let tree_builder = mem::replace(&mut self.tok_tree, TokenTreeBuilder::new());
+            let tree = match tree_builder.finalize(&self.toks) {
+                Ok(tree) => tree,
+                Err(err) => {
+                    self.add_tree_build_errors(err);
+                    return Err(mem::take(&mut self.errors))
+                },
+            };
+
+            let mut stream = mem::replace(&mut self.toks, TokenStream::new());
+            stream.set_tree_data(tree);
+            Ok(stream)
         }
     }
 
@@ -565,9 +590,25 @@ impl Lexer {
         let mut is_end = false;
         let mut is_interp = false;
 
-        let is_continuation = self.cur_line().starts_with('}');
+        let inner = &self.offset_from_cur_line(0);
+        let is_continuation = inner.starts_with("}");
+        let is_start = inner.starts_with("\"");
 
-        let inner = &self.offset_from_cur_line(1);
+        if let Some(depth) = self.interp_indent_depth() {
+            if depth > 0 && is_continuation {
+                self.lex_punctuation();
+                return;
+            }
+
+            if is_start && !self.line_has_token {
+                let token = Token::Literal(Literal::InterpIndicator);
+                let meta = self.consume_and_get_meta(1);
+                self.add_token(token, meta);
+                return;
+            }
+        }
+
+        let inner = self.offset_from_cur_line(1);
         let end = inner.find(|ch: char|
             match ch {
             '\\' => {
@@ -629,6 +670,8 @@ impl Lexer {
 
         if is_interp {
             self.push_interp_indent();
+        } else if is_continuation {
+            self.pop_interp_indent();
         }
         self.in_multi_str = !is_end;
     }
@@ -979,8 +1022,34 @@ impl Lexer {
     }
 
     fn add_token(&mut self, token: Token, meta: TokenMeta) {
+        let tok_idx = self.toks.len()as u32;
+
+        let (should_begin, should_end) = match token {
+            Token::OpenDelim(_) => (true, false),
+            Token::CloseDelim(delim) => if tok_idx == 0 {
+                self.add_error(Some(token.as_str().len()), LexError::NoOpenDelimiter(delim.as_close_str()));
+                (false, false)
+            } else {
+                (false, true)
+            },
+            Token::Literal(Literal::InterpString { includes_end, includes_start, .. }) => (includes_start, includes_end),
+            Token::Literal(Literal::MultiInterpString { includes_end, includes_start, .. }) => (includes_start, includes_end),
+            _ => (false, false),
+        };
+
+
         self.line_has_token = true;
         self.toks.push(token, meta);
+
+        if should_end {
+            if let Err(err) = self.tok_tree.end_subtree(tok_idx, &self.toks) {
+                self.add_tree_build_errors(err);
+            }
+        }
+
+        if should_begin {
+            self.tok_tree.begin_subtree(tok_idx);
+        }
     }
 
     fn add_error(&mut self, byte_len: Option<usize>, err: LexError) {
@@ -1004,6 +1073,10 @@ impl Lexer {
             },
         };
 
+        self.errors.push((span, err));
+    }
+
+    fn add_spanned_error(&mut self, span: Span, err: LexError) {
         self.errors.push((span, err));
     }
 
@@ -1046,10 +1119,22 @@ impl Lexer {
     }
 
     fn pop_interp_indent(&mut self) {
-        self.interp_stack.pop();
+        if matches!(self.interp_stack.last(), Some(0)) {
+            self.interp_stack.pop();
+        }
     }
 
     fn interp_indent_depth(&self) -> Option<u32> {
         self.interp_stack.last().cloned()
+    }
+
+    fn add_tree_build_errors(&mut self, error: TokenTreeBuildError) {
+        match error {
+            TokenTreeBuildError::EndOfRootTree                  => self.add_error(None, LexError::EndOfRootTree),
+            TokenTreeBuildError::Missing(errors)                 => for (span, item) in errors { //LexError::MissingDelimiter(items),
+                self.add_spanned_error(span, LexError::MissingDelimiter(item));
+            },
+            TokenTreeBuildError::Unexpected { span, expected, found } => self.add_spanned_error(span, LexError::UnmatchedDelimiter { expected, found }),
+        }
     }
 }

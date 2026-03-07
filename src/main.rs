@@ -42,12 +42,16 @@ fn main() {
     for file_path in &args.input_files {
         if parsed_files.contains(file_path) { continue; }
 
-        let Ok(toks) = lex(file_path, &ctx) else { continue; };
+        let Ok(toks) = lex_file(file_path, &ctx) else { continue; };
 
         if args.output_token_csv {
             let path = args.output.clone() + CSV_TOKEN_PATH_ROOT + &file_path[..file_path.len() - 3] + ".csv";
             _ = fmt_to_file(&path, &toks.csv_formatter());
             _ = log!(Verbose, "\n{}", toks.csv_formatter());
+        }
+
+        if args.log_token_tree {
+            _ = log!(Verbose, "\nToken Tree: \n{}", toks.tree().get_formatter());
         }
 
         parsed_files.insert(file_path.clone());
@@ -64,7 +68,7 @@ fn main() {
     _ = get_logger().flush();
 }
 
-pub fn lex(path: &str, ctx: &Context) -> Result<TokenStream, ()> {
+pub fn lex_file(path: &str, ctx: &Context) -> Result<TokenStream, ()> {
     _ = log!(Debug, "Processing file: {path}");
 
     let path: &Path = path.as_ref();
