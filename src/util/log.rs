@@ -177,9 +177,13 @@ impl Logger {
         lock.log(text)?;
         lock.log("\n")
     }
-
+    
     pub fn log_undecorated(&self, text: &str) -> io::Result<()> {
         self.lock(false).log(text)
+    }
+    
+    pub fn log_undecorated_fmt(&self, args: Arguments) -> io::Result<()> {
+        self.lock(false).log_fmt(args)
     }
 
     fn lock<'a>(&'a self, to_stderr: bool) -> LockedLog<'a> {

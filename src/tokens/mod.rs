@@ -43,6 +43,35 @@ pub enum Token {
     Literal(Literal),
 }
 
+impl Token {
+    pub fn get_kind_str(&self) -> &'static str {
+        match self {
+            Self::StrongKw(_)                                    => "Strong Kw",
+            Self::ReservedKw(_)                                  => "Reserved Kw",
+            Self::WeakKw(_)                                      => "Weak Kw",
+            Self::PatternKw(_)                                   => "Pattern Kw",
+            Self::OpenDelim(_)                                   => "Open Delim",
+            Self::CloseDelim(_)                                  => "Close Delim",
+            Self::Punct(_)                                       => "Punct",
+            Self::Name(_)                                        => "Name",
+            Self::Literal(Literal::Decimal{ .. })                => "Dec Lit",
+            Self::Literal(Literal::DecimalFloat{ .. })           => "Dec Float Lit",
+            Self::Literal(Literal::Binary(_))                    => "Bin Lit",
+            Self::Literal(Literal::Octal(_))                     => "Oct Lit",
+            Self::Literal(Literal::Hexadecimal(_))               => "Hex Lit",
+            Self::Literal(Literal::HexadecimalFloat{ .. })       => "Hex Float Lit",
+            Self::Literal(Literal::Char(_))                      => "Char Lit",
+            Self::Literal(Literal::String(_))                    => "String Lit",
+            Self::Literal(Literal::MultiStringSegment { .. })    => "Multi-line String Lit",
+            Self::Literal(Literal::RawString { .. })             => "Raw String Lit",
+            Self::Literal(Literal::MultiRawStringSegment { .. }) => "Multi-line Raw String Lit",
+            Self::Literal(Literal::InterpString { .. })          => "Interp String Lit",
+            Self::Literal(Literal::MultiInterpString { .. })     => "Multi-segment Interp String Lit",
+            Self::Literal(Literal::InterpIndicator)              => "Interp Segment Indicator",
+        }
+    }
+}
+
 pub struct TokenMeta {
     pub span:   Span,
     pub trivia: Trivia,

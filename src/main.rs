@@ -21,7 +21,10 @@ use crate::{
     context::Context,
     lex::{LexError, Lexer},
     tokens::TokenStream,
-    util::{log::{get_logger, init_global_logger}, time::Timer}
+    util::{
+        log::{get_logger, init_global_logger},
+        time::Timer
+    }
 };
 
 

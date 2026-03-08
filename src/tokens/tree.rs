@@ -1,4 +1,4 @@
-use std::{fmt, io};
+use std::fmt;
 
 use crate::{tokens::{Span, Token, TokenStream}, util::format::TreeIndentFormatter};
 
@@ -19,7 +19,7 @@ impl Default for TokenTreeData {
     }
 }
 
-enum TokenOrSubtree<'a> {
+pub enum TokenOrSubtree<'a> {
     Token(Token),
     Subtree(TokenTree<'a>)
 }
@@ -68,6 +68,18 @@ impl TokenTree<'_> {
     pub fn get_formatter<'a>(&'a self) -> TokenTreeFormatter<'a> {
         TokenTreeFormatter { tree: self }
     }
+
+    fn get_max_indent(&self) -> usize {
+        Self::_get_max_indent(&self.tree_data)
+    }
+    fn _get_max_indent(tree_data: &TokenTreeData) -> usize {
+        let mut max_indent = 0;
+        for sub_tree in &tree_data.subtrees {
+            let indent = Self::_get_max_indent(sub_tree);
+            max_indent = max_indent.max(indent);
+        }
+        max_indent + 1
+    }
 }
 
 pub struct TokenTreeFormatter<'a> {
@@ -75,23 +87,25 @@ pub struct TokenTreeFormatter<'a> {
 }
 
 impl TokenTreeFormatter<'_> {
-    fn fmt_tree(&self, f: &mut fmt::Formatter<'_>, sub_tree: &TokenTree, idx: &mut usize, indents: &mut TreeIndentFormatter, first: bool) -> fmt::Result {
+    fn fmt_tree(&self, f: &mut fmt::Formatter<'_>, sub_tree: &TokenTree, idx: &mut usize, indents: &mut TreeIndentFormatter, max_ident: usize, first: bool) -> fmt::Result {
         if !first {
             indents.push_no_name();
         }
 
         let end = sub_tree.tree_data.end as u32;
+        let indent_width = (max_ident - indents.depth() - 1) * 4 + 31;
+
         while *idx <= end as usize {
             indents.set_final_indent_if(*idx == end as usize);
 
             match sub_tree.get_token_or_subtree(*idx as u32).unwrap() {
                 TokenOrSubtree::Token(token) => {
-                    write!(f, "{indents}{token}\n")?;
+                    write!(f, "{indents}{:indent_width$}: {token}\n", token.get_kind_str())?;
                     *idx += 1;
                 },
                 TokenOrSubtree::Subtree(token_tree) => {
                     indents.set_final_indent_if(first && token_tree.tree_data.end == end);
-                    self.fmt_tree(f, &token_tree, idx, indents, false)?
+                    self.fmt_tree(f, &token_tree, idx, indents, max_ident, false)?
                 },
             }
             indents.signal_no_name_formatted();
@@ -113,7 +127,8 @@ impl fmt::Display for TokenTreeFormatter<'_> {
 
         let mut idx = 0;
         let mut indents = TreeIndentFormatter::new();
-        self.fmt_tree(f, &self.tree, &mut idx, &mut indents, true)
+        let max_indent = self.tree.get_max_indent();
+        self.fmt_tree(f, &self.tree, &mut idx, &mut indents, max_indent, true) 
     }
 }
 

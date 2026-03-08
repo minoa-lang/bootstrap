@@ -586,11 +586,7 @@ impl Lexer {
 
     // Does not handle interpolated strings yet
     fn lex_string(&mut self) {
-        let mut prev_char_is_escape = false;
-        let mut is_end = false;
-        let mut is_interp = false;
-
-        let inner = &self.offset_from_cur_line(0);
+        let inner = &self.cur_line();
         let is_continuation = inner.starts_with("}");
         let is_start = inner.starts_with("\"");
 
@@ -608,7 +604,16 @@ impl Lexer {
             }
         }
 
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum EndKind {
+            None,
+            End,
+            Interp,
+        }
+        
         let inner = self.offset_from_cur_line(1);
+        let mut end_kind = EndKind::None;
+        let mut prev_char_is_escape = false;
         let end = inner.find(|ch: char|
             match ch {
             '\\' => {
@@ -619,11 +624,11 @@ impl Lexer {
                 prev_char_is_escape = false;
                 false
             } else {
-                is_end = true;
+                end_kind = EndKind::End;
                 true
             }
             '{' if prev_char_is_escape => {
-                is_interp = true;
+                end_kind = EndKind::Interp;
                 true
             },
             _ => {
@@ -632,48 +637,50 @@ impl Lexer {
             },
         }).unwrap_or(inner.len() - self.eol_size());
 
-        let inner = &inner[..end - (is_interp as usize)];
-        let token = if is_interp {
-            Token::Literal(Literal::InterpString{ 
-                includes_start: true,
-                includes_end: is_continuation,
-                content: inner.to_string(),
-            })
-        } else if is_end {
-            if is_continuation {
+        let inner = &inner[..end - ((end_kind == EndKind::Interp) as usize)];
+
+        let token = match end_kind {
+            EndKind::End => if is_continuation {
                 Token::Literal(Literal::InterpString {
-                    includes_end: is_continuation,
+                    includes_end: true,
                     includes_start: false,
                     content: inner.to_string(),
                 })
             } else {
                 Token::Literal(Literal::String(inner.to_string()))
-            }
-        } else {
-            let newline = !inner.ends_with('\\');
-            let inner = &inner[..inner.len() - (!newline as usize)];
-            if is_continuation {
-                Token::Literal(Literal::MultiInterpString{
+            },
+            EndKind::Interp => {
+                let newline = !inner.ends_with('\\');
+                let inner = &inner[..inner.len() - (!newline as usize)];
+                Token::Literal(Literal::MultiInterpString { 
+                    includes_start: true,
                     includes_end: is_continuation,
-                    includes_start: false,
                     content: inner.to_string(),
                     newline
                 })
+            },
+            EndKind::None => if is_continuation {
+                Token::Literal(Literal::InterpString{
+                    includes_end: is_continuation,
+                    includes_start: false,
+                    content: inner.to_string()
+                })
             } else {
+                let newline = !inner.ends_with('\\');
+                let inner = &inner[..inner.len() - (!newline as usize)];
                 Token::Literal(Literal::MultiStringSegment{ content: inner.to_string(), newline })
-            }
+            },
         };
 
-
-        let meta = self.consume_and_get_meta(inner.len() + (is_end as usize) + (is_interp as usize) * 2 + 1);
+        let meta = self.consume_and_get_meta(inner.len() + (end_kind as usize) + 1);
         self.add_token(token, meta);
 
-        if is_interp {
+        if end_kind == EndKind::Interp {
             self.push_interp_indent();
         } else if is_continuation {
             self.pop_interp_indent();
         }
-        self.in_multi_str = !is_end;
+        self.in_multi_str = end_kind != EndKind::End;
     }
 
     /// Lexes raw strings starting with '`'
