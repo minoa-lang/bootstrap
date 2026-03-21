@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, ops::Index};
 
 mod keywords;
 use bootstrap_macros::enum_utils;
@@ -82,14 +82,16 @@ pub struct TokenStream {
     tokens:   Vec<Token>,
     metadata: Vec<TokenMeta>,
     tree:     TokenTreeData,
+    source:   String,
 }
 
 impl TokenStream {
-    pub fn new() -> Self {
+    pub fn new(source: String) -> Self {
         TokenStream {
             tokens: Vec::new(),
             metadata: Vec::new(),
             tree: TokenTreeData::default(),
+            source,
         }
     }
 
@@ -139,6 +141,10 @@ impl TokenStream {
         }
     }
 
+    pub fn path(&self) -> &str {
+        &self.source
+    }
+
     pub fn no_trivia_formatter<'a>(&'a self) -> NoTriviaTokenStreamFormatter<'a> {
         NoTriviaTokenStreamFormatter { tokens: self }
     }
@@ -149,6 +155,15 @@ impl TokenStream {
 
     pub fn set_tree_data(&mut self, tree: TokenTreeData) {
         self.tree = tree;
+    }
+}
+
+impl Index<usize> for TokenStream {
+    type Output = Token;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        assert!(index < self.tokens.len());
+        &self.tokens[index]
     }
 }
 

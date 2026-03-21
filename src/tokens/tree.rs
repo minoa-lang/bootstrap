@@ -65,6 +65,29 @@ impl TokenTree<'_> {
         *self
     }
 
+    pub fn get_subtree_and_idx_for_token(&self, tok_idx: u32) -> Option<(TokenTree<'_>, u32)> {
+        for (idx, sub_tree) in self.tree_data.subtrees.iter().enumerate() {
+            if tok_idx >= sub_tree.start && tok_idx <= sub_tree.end {
+                return Some((
+                    TokenTree {
+                        stream: self.stream,
+                        tree_data: sub_tree,
+                        depth: self.depth + 1,
+                    },
+                    idx as u32));
+            }
+        }
+        None
+    }
+
+    pub fn start(&self) -> u32 {
+        self.tree_data.start
+    }
+
+    pub fn end(&self) -> u32 {
+        self.tree_data.end
+    }
+
     pub fn get_formatter<'a>(&'a self) -> TokenTreeFormatter<'a> {
         TokenTreeFormatter { tree: self }
     }
@@ -79,6 +102,22 @@ impl TokenTree<'_> {
             max_indent = max_indent.max(indent);
         }
         max_indent + 1
+    }
+}
+
+impl<'a> TokenTree<'a> {
+    pub fn get_subtree_from_tree_indices(self, indices: &[u32]) -> TokenTree<'a> {
+        if indices.len() == 0 {
+            return self;
+        }
+
+        let idx = indices[0];
+        let sub_tree = TokenTree {
+            stream: &self.stream,
+            tree_data: &self.tree_data.subtrees[idx as usize],
+            depth: self.depth + 1
+        };
+        sub_tree.get_subtree_from_tree_indices(&indices[1..])
     }
 }
 
@@ -128,6 +167,7 @@ impl fmt::Display for TokenTreeFormatter<'_> {
         let mut idx = 0;
         let mut indents = TreeIndentFormatter::new();
         let max_indent = self.tree.get_max_indent();
+        f.write_str("Token Tree:\n")?;
         self.fmt_tree(f, &self.tree, &mut idx, &mut indents, max_indent, true) 
     }
 }
@@ -195,6 +235,10 @@ impl TokenTreeBuilder {
     }
 
     pub fn finalize(mut self, stream: &TokenStream) -> Result<TokenTreeData, TokenTreeBuildError> {
+        if stream.is_empty() {
+            return Ok(self.stack.pop().unwrap());
+        }
+
         if self.stack.len() > 1 {
             let mut missing = Vec::with_capacity(self.stack.len() - 1);
             for open in self.stack.iter().skip(1) {
