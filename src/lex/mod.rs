@@ -1,5 +1,6 @@
 #![allow(unused)]
 
+use core::num;
 use std::{
     collections::HashMap,
     fmt,
@@ -12,7 +13,7 @@ use std::{
 
 use bootstrap_macros::enum_utils;
 
-use crate::{tokens::{is_whitespace_trivia, CharLiteral, Delimiter, EscapeSequence, Exponent, HexExponent, Literal, LiteralError, LiteralSegment, Punctuation, ReservedKeyword, Span, StrongKeyword, Token, TokenMeta, TokenStream, TokenTreeBuildError, TokenTreeBuilder, Trivia, TriviaElem, WeakKeyword}};
+use crate::tokens::{get_delim_len, is_whitespace_trivia, CharLiteral, Delimiter, EscapeSequence, Exponent, HexExponent, Literal, LiteralError, LiteralSegment, PatternKeyword, PatternKeywordEndianness, Punctuation, ReservedKeyword, Span, StrongKeyword, Token, TokenMeta, TokenStream, TokenTreeBuildError, TokenTreeBuilder, Trivia, TriviaElem, WeakKeyword};
 
 #[enum_utils(display)]
 pub enum LexError {
@@ -45,6 +46,8 @@ pub enum LexError {
         expected: &'static str,
         found: &'static str,
     },
+    #[fmt("Pattern keyword has too many bits: {_0}, max: 65535")]
+    ToManyBitsForPattern(u64),
 }
 
 pub struct Lexer {
@@ -76,7 +79,7 @@ pub struct Lexer {
 impl Lexer {
     const LINE_BUF_MIN_SIZE: usize = 4096;
 
-    pub fn new(source_file: File) -> Self {
+    pub fn new(source_file: File, path: &str) -> Self {
         let reader = BufReader::new(source_file);
 
         // Inefficient, but easy
@@ -106,7 +109,7 @@ impl Lexer {
             kw_map,
             punct_map,
             trivia: Trivia::new(),
-            toks: TokenStream::new(),
+            toks: TokenStream::new(format!("file:/{path}")),
             tok_tree: TokenTreeBuilder::new(),
             line_buf: String::with_capacity(Self::LINE_BUF_MIN_SIZE),
             line_offset: 0,
@@ -157,7 +160,7 @@ impl Lexer {
                 },
             };
 
-            let mut stream = mem::replace(&mut self.toks, TokenStream::new());
+            let mut stream = mem::replace(&mut self.toks, TokenStream::new(String::new()));
             stream.set_tree_data(tree);
             Ok(stream)
         }
@@ -213,7 +216,53 @@ impl Lexer {
                 tok
             },
             None => {
-                Token::Name(name.to_string())
+                // Now check if this might be a pattern keyword
+                let name = name.to_string();
+
+                // We should never get here is name is empty
+                let ch = name.chars().next().unwrap();
+                match ch {
+                    'i' | 'u' | 'f' | 'b' => 'block: {
+                        let mut numeric_part = &name[1..];
+                        let endianness = if numeric_part.ends_with("le") {
+                            numeric_part = &numeric_part[..numeric_part.len() - 2];
+                            PatternKeywordEndianness::Le
+                        } else if numeric_part.ends_with("be") {
+                            numeric_part = &numeric_part[..numeric_part.len() - 2];
+                            PatternKeywordEndianness::Be
+                        } else if numeric_part.ends_with(|ch: char| ch.is_numeric()) {
+                            PatternKeywordEndianness::None
+                        } else {
+                            break 'block;
+                        };
+
+                        let bits = match numeric_part.parse::<u64>() {
+                            Ok(bits) => bits,
+                            Err(_) => break 'block,
+                        };
+
+                        if bits > u16::MAX as u64 {
+                            self.add_error(Some(name_len), LexError::ToManyBitsForPattern(bits));
+                            break 'block;
+                        }
+                        let bits = bits as u16;
+
+                        let pat = match ch {
+                            'i' => PatternKeyword::I { bits, endianness },
+                            'u' => PatternKeyword::U { bits, endianness },
+                            'f' => PatternKeyword::F { bits, endianness },
+                            'b' => PatternKeyword::B { bits, endianness },
+                            _ => unreachable!(),
+                        };
+
+                        let meta = self.consume_and_get_meta(name_len);
+                        self.add_token(Token::PatternKw(pat), meta);
+                        return;
+                    }
+                    _ => (),
+                }
+
+                Token::Name(name)
             },
         };
 
@@ -233,49 +282,71 @@ impl Lexer {
     }
 
     fn lex_punctuation(&mut self) {
-        let punct = self.read_find_from_offset(1, |ch| !(is_whitespace_trivia(ch) || ch.is_alphanumeric()));
+        let mut punct = self.read_find_from_offset(1, |ch| !(is_whitespace_trivia(ch) || ch.is_alphanumeric()));
 
-        // If we got here, we know that there is at least 1 character in `punct`
-        let (token, len) = match punct.chars().next().unwrap() {
-            '(' => (Token::OpenDelim(Delimiter::Parenthesis), 1),
-            ')' => (Token::CloseDelim(Delimiter::Parenthesis), 1),
-            '[' => {
-                if punct.starts_with("[<") {
-                    (Token::OpenDelim(Delimiter::Vector), 2)
-                } else {
-                    (Token::OpenDelim(Delimiter::Bracket), 1)
-                }
-            }
-            ']' => (Token::CloseDelim(Delimiter::Bracket), 1),
-            '{' => {
-                self.increment_interp_indent();
-                (Token::OpenDelim(Delimiter::Brace), 1)
+        // Find the next delimiter, as stop after it, or if we are at the start, get it's lenght
+
+        let single_puncts = &[
+            '(',
+            ')',
+            '{',
+            '}',
+            '[',
+            ']',
+        ];
+
+        let end_offset = match punct.find("[<") {
+            Some(0) => {
+                let meta = self.consume_and_get_meta(2);
+                self.add_token(Token::OpenDelim(Delimiter::Vector), meta);
+                return;
             },
-            '}' => {
-                self.decrement_interp_indent();
-                (Token::CloseDelim(Delimiter::Brace), 1)
+            Some(offset) => Some(offset),
+            None => None,
+        };
+        let end_offset = match punct.find(">]") {
+            Some(0) => {
+                let meta = self.consume_and_get_meta(2);
+                self.add_token(Token::CloseDelim(Delimiter::Vector), meta);
+                return;
             },
-            '>' => if punct.starts_with(">]") {
-                (Token::CloseDelim(Delimiter::Vector), 2)
-            } else {
-                match self.punct_map.get(punct) {
-                    Some(tok) => (tok.clone(), punct.len()),
-                    None => {
-                        let len = punct.to_string();
-                        (Token::Punct(Punctuation::Other(punct.to_string())), punct.len())
+            Some(offset) => Some(offset),
+            None => end_offset,
+        };
+        let end_offset = match punct.find(single_puncts) {
+            Some(0) => {
+                let token = match punct.chars().next().unwrap() {
+                    '(' => Token::OpenDelim(Delimiter::Parenthesis),
+                    ')' => Token::CloseDelim(Delimiter::Parenthesis),
+                    '[' => Token::OpenDelim(Delimiter::Bracket),
+                    ']' => Token::CloseDelim(Delimiter::Bracket),
+                    '{' => {
+                        self.increment_interp_indent();
+                        Token::OpenDelim(Delimiter::Brace)
                     },
-                }
-            },
-            _ => match self.punct_map.get(punct) {
-                Some(tok) => (tok.clone(), punct.len()),
-                None => {
-                    let len = punct.to_string();
-                    (Token::Punct(Punctuation::Other(punct.to_string())), punct.len())
-                },
+                    '}' => {
+                        self.decrement_interp_indent();
+                        Token::CloseDelim(Delimiter::Brace)
+                    },
+                    _ => unreachable!()
+                };
+                let meta = self.consume_and_get_meta(1);
+                self.add_token(token, meta);
+                return;
             }
+            Some(offset) => Some(offset),
+            None => end_offset,
         };
 
-        let meta = self.consume_and_get_meta(len);
+        let end_offset = end_offset.unwrap_or(punct.len());
+        let punct = &punct[..end_offset];
+
+        let token = match self.punct_map.get(punct) {
+            Some(tok) => tok.clone(),
+            None => Token::Punct(Punctuation::Other(punct.to_string())),
+        };
+        
+        let meta = self.consume_and_get_meta(end_offset);
         self.add_token(token, meta);
     }
 
